@@ -1,0 +1,79 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { BullModule } from '@nestjs/bull';
+import { AuthModule } from './modules/auth/auth.module';
+import { ChatModule } from './modules/chat/chat.module';
+import { RagModule } from './modules/rag/rag.module';
+import { ScraperModule } from './modules/scraper/scraper.module';
+import { DocumentsModule } from './modules/documents/documents.module';
+import { AnalyticsModule } from './modules/analytics/analytics.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { HealthController } from './modules/health/health.controller';
+import { appConfig } from './config/app.config';
+
+@Module({
+  controllers: [HealthController],
+  imports: [
+    // ─── Config ───────────────────────────────────────────────────
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [appConfig],
+      envFilePath: ['.env', '.env.local'],
+    }),
+
+    // ─── MongoDB ──────────────────────────────────────────────────
+    MongooseModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (cs: ConfigService) => ({
+        uri: cs.get<string>('MONGO_URI'),
+        retryAttempts: 5,
+        retryDelay: 3000,
+        connectionFactory: (conn) => {
+          conn.on('connected', () => console.log('✅ MongoDB connected'));
+          conn.on('error', (e) => console.error('❌ MongoDB error:', e));
+          return conn;
+        },
+      }),
+    }),
+
+    // ─── Rate limiting ────────────────────────────────────────────
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (cs: ConfigService) => ({
+        throttlers: [{
+          ttl: cs.get<number>('RATE_LIMIT_TTL', 60) * 1000,
+          limit: cs.get<number>('RATE_LIMIT_MAX', 30),
+        }],
+      }),
+    }),
+
+    // ─── Redis / BullMQ ───────────────────────────────────────────
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (cs: ConfigService) => ({
+        redis: cs.get<string>('REDIS_URL'),
+        defaultJobOptions: {
+          removeOnComplete: 100,
+          removeOnFail: 50,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+        },
+      }),
+    }),
+
+    // ─── Feature modules ──────────────────────────────────────────
+    AuthModule,
+    ChatModule,
+    RagModule,
+    ScraperModule,
+    DocumentsModule,
+    AnalyticsModule,
+    AdminModule,
+  ],
+})
+export class AppModule {}
