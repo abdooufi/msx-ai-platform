@@ -3,14 +3,15 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { BullModule } from '@nestjs/bull';
 import { MulterModule } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
-import { extname, join } from 'path';
+import { extname } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { DocumentsController } from './documents.controller';
 import { DocumentsService } from './documents.service';
 import { DocumentsProcessor } from './documents.processor';
 import { UploadedDocument, UploadedDocumentSchema } from '../../schemas/uploaded-document.schema';
+import { DOCUMENTS_QUEUE } from './documents.constants';
 
-export const DOCUMENTS_QUEUE = 'documents';
+export { DOCUMENTS_QUEUE } from './documents.constants';
 
 @Module({
   imports: [

@@ -4,7 +4,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Model } from 'mongoose';
 import { Queue } from 'bull';
 import { UploadedDocument, UploadedDocumentDocument } from '../../schemas/uploaded-document.schema';
-import { DOCUMENTS_QUEUE } from './documents.module';
+import { DOCUMENTS_QUEUE } from './documents.constants';
 
 @Injectable()
 export class DocumentsService {
@@ -56,3 +56,4 @@ export class DocumentsService {
     return { ok: true };
   }
 }
+

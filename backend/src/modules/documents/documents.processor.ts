@@ -14,7 +14,7 @@ import {
   UploadedDocumentDocument,
   DocStatus,
 } from '../../schemas/uploaded-document.schema';
-import { DOCUMENTS_QUEUE } from './documents.module';
+import { DOCUMENTS_QUEUE } from './documents.constants';
 
 @Processor(DOCUMENTS_QUEUE)
 export class DocumentsProcessor {
