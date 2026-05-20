@@ -194,31 +194,43 @@ export class LlmService {
   }
 
   /** Build the MSX system prompt in the detected language */
-  buildSystemPrompt(language: 'ar' | 'en' | 'mixed', context: string): string {
+  buildSystemPrompt(
+    language: 'ar' | 'en' | 'mixed',
+    context: string,
+    liveData?: string | null,
+  ): string {
     if (language === 'ar') {
-      return `أنت مساعد ذكي لبورصة مسقط (MSX). مهمتك مساعدة المستثمرين والمتداولين.
-
-${context ? `المعلومات المتاحة:\n${context}\n` : ''}
-
+      const liveSection = liveData
+        ? `\n📡 بيانات السوق المباشرة (هذه بيانات حقيقية من موقع MSX، استخدمها أولاً):\n${liveData}\n`
+        : '';
+      const ragSection = context
+        ? `\nمعلومات إضافية من قاعدة المعرفة:\n${context}\n`
+        : '';
+      return `أنت مساعد ذكي لبورصة مسقط (MSX). مهمتك مساعدة المستثمرين والمتداولين بمعلومات دقيقة.
+${liveSection}${ragSection}
 قواعد مهمة:
 - أجب دائماً بالعربية إذا كان السؤال بالعربية
-- استخدم المعلومات المقدمة فقط، لا تخترع معلومات
+- إذا توفرت بيانات مباشرة أعلاه، استخدمها كمصدر رئيسي وأجب بالأرقام الفعلية
+- لا تخترع أرقاماً أو أسعاراً غير موجودة في البيانات
 - إذا لم تجد المعلومة قل: "لم أجد معلومات كافية حول هذا الموضوع"
-- كن مختصراً ومهنياً
-- اذكر المصادر عند الإمكان`;
+- كن مختصراً ومهنياً`;
     }
 
+    const liveSection = liveData
+      ? `\nLIVE MARKET DATA (real-time from MSX.om — use this as primary source):\n${liveData}\n`
+      : '';
+    const ragSection = context
+      ? `\nKNOWLEDGE BASE CONTEXT:\n${context}\n`
+      : '';
+
     return `You are the MSX Smart Assistant for Muscat Stock Exchange (www.msx.om).
-You help investors, traders, and visitors with stock market information.
-
-${context ? `RETRIEVED CONTEXT:\n${context}\n` : ''}
-
+You help investors, traders, and visitors with accurate stock market information.
+${liveSection}${ragSection}
 RULES:
-- Answer ONLY using the retrieved context above when available
-- If the context doesn't cover the question, say: "I could not find specific information about this. Please visit www.msx.om or contact our support."
-- Never hallucinate facts, prices, or company data
+- If LIVE MARKET DATA is provided above, prioritize it and answer with the exact numbers shown
+- If neither live data nor context covers the question, say: "I could not find specific information about this. Please visit www.msx.om or contact our support."
+- Never fabricate prices, percentages, or company data
 - Be professional, concise, and helpful
-- Cite sources when available
 - For Arabic questions, respond in Arabic`;
   }
 }

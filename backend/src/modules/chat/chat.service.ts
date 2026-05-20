@@ -5,6 +5,7 @@ import { Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { RagService } from '../rag/rag.service';
 import { LlmService, LlmMessage } from '../rag/llm.service';
+import { DynamicApiService } from '../admin/dynamic-api.service';
 import {
   Conversation,
   ConversationDocument,
@@ -29,6 +30,7 @@ export class ChatService {
     private analyticsModel: Model<AnalyticsEventDocument>,
     private rag: RagService,
     private llm: LlmService,
+    private dynamicApi: DynamicApiService,
   ) {}
 
   /**
@@ -46,11 +48,19 @@ export class ChatService {
     // 1. Detect language
     const language = await this.llm.detectLanguage(dto.message);
 
-    // 2. RAG retrieval
-    const { context, sources, hadResults } = await this.rag.retrieve(
-      dto.message,
-      language,
-    );
+    // 2. Extract company symbol and fetch live market data (parallel with RAG)
+    const symbol = this.dynamicApi.extractSymbol(dto.message);
+    const [ragResult, liveData] = await Promise.all([
+      this.rag.retrieve(dto.message, language),
+      symbol
+        ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    const { context, sources, hadResults } = ragResult;
+
+    if (liveData) {
+      this.logger.log(`Live data injected for symbol: ${symbol}`);
+    }
 
     // 3. Build conversation history (last 10 turns for context window)
     const historyMessages: LlmMessage[] = (dto.history || [])
@@ -58,8 +68,8 @@ export class ChatService {
       .filter(h => h.role && h.content)
       .map(h => ({ role: h.role as 'user' | 'assistant', content: h.content }));
 
-    // 4. Build system prompt with retrieved context
-    const systemPrompt = this.llm.buildSystemPrompt(language, context);
+    // 4. Build system prompt with retrieved context and live data
+    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData);
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
       ...historyMessages,

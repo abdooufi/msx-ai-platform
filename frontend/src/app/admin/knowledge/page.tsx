@@ -5,7 +5,7 @@ import {
   Database, RefreshCcw, Trash2, Play, CheckCircle2,
   AlertCircle, Loader2, ChevronLeft, ChevronRight,
   Search, Plus, Pencil, X, Save, BookOpen, HelpCircle,
-  Globe, Building2, Zap,
+  Globe, Building2, Zap, FlaskConical, Download,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
@@ -14,6 +14,7 @@ import {
   getPgFaqs, upsertPgFaq, deletePgFaq,
   getPgCompanies, upsertPgCompany, deletePgCompany,
   getPgApiEndpoints, upsertPgApiEndpoint, deletePgApiEndpoint,
+  testPgApiEndpoint, seedPgApiEndpoints,
   getPgSummary,
 } from '../../../lib/api'
 
@@ -730,13 +731,37 @@ function CompaniesPanel() {
 
 // ─── API Endpoints Panel ──────────────────────────────────────────────────────
 
+const METHOD_CLS: Record<string, string> = {
+  GET:    'bg-green-500/10 text-green-300',
+  POST:   'bg-blue-500/10 text-blue-300',
+  PUT:    'bg-yellow-500/10 text-yellow-300',
+  PATCH:  'bg-yellow-500/10 text-yellow-300',
+  DELETE: 'bg-red-500/10 text-red-300',
+}
+
+const CATEGORIES = ['company','trading','news','financial','chart','governance','board','subsidiaries','ownership','dividends','general']
+
+function jsonStr(v: any): string {
+  if (!v) return '{}'
+  if (typeof v === 'string') return v
+  return JSON.stringify(v, null, 2)
+}
+
+function parseJsonSafe(s: string): any {
+  try { return JSON.parse(s) } catch { return s }
+}
+
 function ApiEndpointsPanel() {
   const [rows, setRows] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
+  const [seeding, setSeeding] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState<string | null>(null)
+  const [testSymbol, setTestSymbol] = useState('OQEP')
+  const [testResult, setTestResult] = useState<any | null>(null)
   const LIMIT = 15
 
   const load = async (p = page) => {
@@ -750,11 +775,33 @@ function ApiEndpointsPanel() {
 
   useEffect(() => { load(1) }, []) // eslint-disable-line
 
+  const handleSeed = async () => {
+    setSeeding(true)
+    try {
+      const { data } = await seedPgApiEndpoints()
+      toast.success(`Seed complete: ${data.created} created, ${data.skipped} skipped`)
+      load(1)
+    } catch { toast.error('Seed failed') } finally { setSeeding(false) }
+  }
+
   const handleSave = async () => {
     if (!editing) return
     setSaving(true)
     try {
-      await upsertPgApiEndpoint(editing)
+      const payload = {
+        ...editing,
+        body:    parseJsonSafe(editing._bodyStr ?? jsonStr(editing.body)),
+        headers: parseJsonSafe(editing._headersStr ?? jsonStr(editing.headers)),
+        keywords_en: Array.isArray(editing.keywords_en)
+          ? editing.keywords_en
+          : (editing.keywords_en || '').split(',').map((s: string) => s.trim()).filter(Boolean),
+        keywords_ar: Array.isArray(editing.keywords_ar)
+          ? editing.keywords_ar
+          : (editing.keywords_ar || '').split(',').map((s: string) => s.trim()).filter(Boolean),
+      }
+      delete payload._bodyStr
+      delete payload._headersStr
+      await upsertPgApiEndpoint(payload)
       toast.success(editing.id ? 'Updated' : 'Created')
       setEditing(null); load()
     } catch { toast.error('Save failed') } finally { setSaving(false) }
@@ -766,15 +813,53 @@ function ApiEndpointsPanel() {
     catch { toast.error('Delete failed') }
   }
 
+  const handleTest = async (id: string) => {
+    setTesting(id)
+    setTestResult(null)
+    try {
+      const { data } = await testPgApiEndpoint(id, testSymbol)
+      setTestResult(data)
+    } catch (e: any) {
+      toast.error(`Test failed: ${e.response?.data?.message || e.message}`)
+    } finally { setTesting(null) }
+  }
+
+  const openEdit = (row: any) => {
+    setEditing({
+      ...row,
+      _bodyStr:    jsonStr(row.body),
+      _headersStr: jsonStr(row.headers),
+      keywords_en: Array.isArray(row.keywords_en) ? row.keywords_en.join(', ') : '',
+      keywords_ar: Array.isArray(row.keywords_ar) ? row.keywords_ar.join(', ') : '',
+    })
+  }
+
   const pages = Math.ceil(total / LIMIT)
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <button onClick={() => setEditing({ name: '', url: '', method: 'GET', description: '', category: '', keywords_en: [], keywords_ar: [], is_active: true })}
-          className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-medium">
-          <Plus size={14} /> Add Endpoint
-        </button>
+      {/* Toolbar */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-400">{total} endpoints</span>
+          <span className="text-gray-600">•</span>
+          <span className="text-xs text-gray-500">Test symbol:</span>
+          <input value={testSymbol} onChange={e => setTestSymbol(e.target.value.toUpperCase())}
+            className="w-24 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs text-white font-mono focus:outline-none focus:border-orange-500"
+            placeholder="OQEP" />
+        </div>
+        <div className="flex gap-2">
+          <button onClick={handleSeed} disabled={seeding}
+            className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600/80 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium">
+            {seeding ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+            Seed 14 MSX Defaults
+          </button>
+          <button onClick={() => openEdit({ name: '', url: '', method: 'POST', description: '', category: 'company',
+            _bodyStr: '{"Symbol": "{Symbol}"}', _headersStr: '{}', keywords_en: '', keywords_ar: '', is_active: true })}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-medium">
+            <Plus size={14} /> Add Endpoint
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -784,40 +869,67 @@ function ApiEndpointsPanel() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Method</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Name</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">URL</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Category</th>
-                <th className="px-4 py-3 w-20" />
+                <th className="text-left px-3 py-3 text-gray-400 font-medium">Method</th>
+                <th className="text-left px-3 py-3 text-gray-400 font-medium">Name</th>
+                <th className="text-left px-3 py-3 text-gray-400 font-medium">URL</th>
+                <th className="text-left px-3 py-3 text-gray-400 font-medium">Category</th>
+                <th className="text-left px-3 py-3 text-gray-400 font-medium">Active</th>
+                <th className="px-3 py-3 text-gray-400 font-medium text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map(row => (
                 <tr key={row.id} className="hover:bg-white/5 transition-colors">
-                  <td className="px-4 py-3">
-                    <span className={`text-xs font-mono px-2 py-0.5 rounded font-bold ${
-                      row.method === 'GET' ? 'bg-green-500/10 text-green-300' :
-                      row.method === 'POST' ? 'bg-blue-500/10 text-blue-300' :
-                      row.method === 'PUT' ? 'bg-yellow-500/10 text-yellow-300' :
-                      'bg-red-500/10 text-red-300'
-                    }`}>{row.method || 'GET'}</span>
+                  <td className="px-3 py-3">
+                    <span className={`text-xs font-mono px-2 py-0.5 rounded font-bold ${METHOD_CLS[row.method] || 'bg-gray-500/10 text-gray-300'}`}>
+                      {row.method || 'GET'}
+                    </span>
                   </td>
-                  <td className="px-4 py-3 text-white font-medium max-w-[160px] truncate">{row.name}</td>
-                  <td className="px-4 py-3 text-gray-400 font-mono text-xs max-w-[220px] truncate">{row.url}</td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3 text-white font-medium max-w-[180px] truncate">{row.name}</td>
+                  <td className="px-3 py-3 text-gray-400 font-mono text-xs max-w-[230px] truncate">{row.url}</td>
+                  <td className="px-3 py-3">
                     {row.category && <span className="text-xs bg-orange-500/10 text-orange-300 px-2 py-0.5 rounded-full">{row.category}</span>}
                   </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-2 justify-center">
-                      <button onClick={() => setEditing({ ...row })} className="text-blue-400 hover:text-blue-300"><Pencil size={14} /></button>
-                      <button onClick={() => handleDelete(row.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+                  <td className="px-3 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${row.is_active ? 'bg-green-500/10 text-green-300' : 'bg-gray-500/10 text-gray-400'}`}>
+                      {row.is_active ? 'On' : 'Off'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-3">
+                    <div className="flex gap-1.5 justify-center">
+                      <button onClick={() => handleTest(row.id)} disabled={!!testing}
+                        title={`Test with ${testSymbol}`}
+                        className="p-1.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 rounded-lg disabled:opacity-40">
+                        {testing === row.id ? <Loader2 size={13} className="animate-spin" /> : <FlaskConical size={13} />}
+                      </button>
+                      <button onClick={() => openEdit(row)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-lg">
+                        <Pencil size={13} />
+                      </button>
+                      <button onClick={() => handleDelete(row.id)} className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg">
+                        <Trash2 size={13} />
+                      </button>
                     </div>
                   </td>
                 </tr>
               ))}
-              {!rows.length && <tr><td colSpan={5} className="text-center text-gray-500 py-8">No endpoints found</td></tr>}
+              {!rows.length && <tr><td colSpan={6} className="text-center text-gray-500 py-8">No endpoints. Click "Seed 14 MSX Defaults" to populate.</td></tr>}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Test result panel */}
+      {testResult && (
+        <div className="bg-gray-950 border border-indigo-500/30 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-indigo-300 flex items-center gap-1.5">
+              <FlaskConical size={12} /> Test result — {testResult.endpoint} / {testResult.symbol}
+            </span>
+            <button onClick={() => setTestResult(null)} className="text-gray-500 hover:text-white"><X size={14} /></button>
+          </div>
+          <pre className="text-xs text-gray-300 overflow-auto max-h-64 font-mono">
+            {JSON.stringify(testResult.raw, null, 2)}
+          </pre>
         </div>
       )}
 
@@ -832,15 +944,18 @@ function ApiEndpointsPanel() {
         </div>
       )}
 
+      {/* Edit/Create Modal */}
       {editing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-gray-900 border border-white/10 rounded-2xl w-full max-w-xl shadow-2xl">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+          <div className="bg-gray-900 border border-white/10 rounded-2xl w-full max-w-2xl shadow-2xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 flex-shrink-0">
               <h3 className="font-semibold text-white">{editing.id ? 'Edit Endpoint' : 'New Endpoint'}</h3>
               <button onClick={() => setEditing(null)} className="text-gray-400 hover:text-white"><X size={18} /></button>
             </div>
-            <div className="p-6 space-y-4">
-              <div className="grid grid-cols-3 gap-4">
+
+            <div className="overflow-y-auto flex-1 p-6 space-y-4">
+              {/* Row 1: Name + Method */}
+              <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs text-gray-400 mb-1">Name *</label>
                   <input value={editing.name || ''} onChange={e => setEditing({ ...editing, name: e.target.value })}
@@ -848,39 +963,93 @@ function ApiEndpointsPanel() {
                 </div>
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Method</label>
-                  <select value={editing.method || 'GET'} onChange={e => setEditing({ ...editing, method: e.target.value })}
+                  <select value={editing.method || 'POST'} onChange={e => setEditing({ ...editing, method: e.target.value })}
                     className="w-full bg-gray-800 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
                     {['GET','POST','PUT','PATCH','DELETE'].map(m => <option key={m}>{m}</option>)}
                   </select>
                 </div>
               </div>
+
+              {/* URL */}
               <div>
-                <label className="block text-xs text-gray-400 mb-1">URL *</label>
+                <label className="block text-xs text-gray-400 mb-1">
+                  URL * <span className="text-gray-600 font-normal ml-1">use &#123;Symbol&#125; as placeholder</span>
+                </label>
                 <input value={editing.url || ''} onChange={e => setEditing({ ...editing, url: e.target.value })}
-                  placeholder="https://api.example.com/endpoint"
+                  placeholder="https://www.msx.om/snapshot.aspx/company"
                   className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-orange-500" />
               </div>
+
+              {/* Description */}
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Description</label>
-                <textarea rows={3} value={editing.description || ''} onChange={e => setEditing({ ...editing, description: e.target.value })}
+                <textarea rows={2} value={editing.description || ''} onChange={e => setEditing({ ...editing, description: e.target.value })}
                   className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500 resize-none" />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+
+              {/* Body + Headers */}
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1">Category</label>
-                  <input value={editing.category || ''} onChange={e => setEditing({ ...editing, category: e.target.value })}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+                  <label className="block text-xs text-gray-400 mb-1">
+                    Request Body (JSON) <span className="text-gray-600">POST only</span>
+                  </label>
+                  <textarea rows={4} value={editing._bodyStr ?? jsonStr(editing.body)}
+                    onChange={e => setEditing({ ...editing, _bodyStr: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-orange-500 resize-none" />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1">Keywords EN</label>
-                  <input
-                    value={Array.isArray(editing.keywords_en) ? editing.keywords_en.join(', ') : ''}
-                    onChange={e => setEditing({ ...editing, keywords_en: e.target.value.split(',').map((s: string) => s.trim()).filter(Boolean) })}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+                  <label className="block text-xs text-gray-400 mb-1">Extra Headers (JSON)</label>
+                  <textarea rows={4} value={editing._headersStr ?? jsonStr(editing.headers)}
+                    onChange={e => setEditing({ ...editing, _headersStr: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-orange-500 resize-none" />
                 </div>
               </div>
+
+              {/* Category + Active */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Category</label>
+                  <select value={editing.category || 'general'} onChange={e => setEditing({ ...editing, category: e.target.value })}
+                    className="w-full bg-gray-800 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                    {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-end pb-1">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!editing.is_active} onChange={e => setEditing({ ...editing, is_active: e.target.checked })}
+                      className="w-4 h-4 rounded accent-orange-500" />
+                    <span className="text-sm text-gray-300">Active (chatbot uses this)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Keywords EN */}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">
+                  Keywords (English) — comma separated, triggers this endpoint when matched
+                </label>
+                <input
+                  value={typeof editing.keywords_en === 'string' ? editing.keywords_en : (editing.keywords_en || []).join(', ')}
+                  onChange={e => setEditing({ ...editing, keywords_en: e.target.value })}
+                  placeholder="price, stock, company, share"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+              </div>
+
+              {/* Keywords AR */}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">
+                  Keywords (Arabic) — comma separated
+                </label>
+                <input
+                  dir="rtl"
+                  value={typeof editing.keywords_ar === 'string' ? editing.keywords_ar : (editing.keywords_ar || []).join(', ')}
+                  onChange={e => setEditing({ ...editing, keywords_ar: e.target.value })}
+                  placeholder="سعر, شركة, سهم"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500 font-arabic text-right" />
+              </div>
             </div>
-            <div className="flex justify-end gap-3 px-6 py-4 border-t border-white/10">
+
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-white/10 flex-shrink-0">
               <button onClick={() => setEditing(null)} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Cancel</button>
               <button onClick={handleSave} disabled={saving}
                 className="flex items-center gap-2 px-4 py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium">

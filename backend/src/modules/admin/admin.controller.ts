@@ -9,6 +9,7 @@ import { Roles } from '../../common/guards/roles.decorator';
 import { AdminService } from './admin.service';
 import { ChatbootPgService } from './chatboot-pg.service';
 import { PgIndexingService, IndexableTable } from './pg-indexing.service';
+import { DynamicApiService } from './dynamic-api.service';
 import { LlmService, AiProvider } from '../rag/llm.service';
 
 @ApiTags('Admin')
@@ -21,6 +22,7 @@ export class AdminController {
     private readonly admin: AdminService,
     private readonly pg: ChatbootPgService,
     private readonly pgIndexing: PgIndexingService,
+    private readonly dynamicApi: DynamicApiService,
     private readonly llm: LlmService,
   ) {}
 
@@ -346,5 +348,40 @@ export class AdminController {
   @ApiOperation({ summary: 'Clear Qdrant vectors for a single PG table' })
   clearTableIndex(@Param('table') table: IndexableTable) {
     return this.pgIndexing.clearTableIndex(table);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Dynamic API — runtime testing, seeding, cache management
+  // ══════════════════════════════════════════════════════════════════════════
+
+  @Post('pg/api-endpoints/:id/test')
+  @ApiOperation({ summary: 'Test an API endpoint live against a real symbol' })
+  @ApiQuery({ name: 'symbol', required: false, description: 'Company ticker e.g. OQEP' })
+  testApiEndpoint(
+    @Param('id') id: string,
+    @Query('symbol') symbol = 'OQEP',
+  ) {
+    return this.dynamicApi.testEndpoint(id, symbol);
+  }
+
+  @Post('pg/api-endpoints/seed')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Seed the 14 default MSX.om API endpoints (idempotent)' })
+  seedApiEndpoints() {
+    return this.dynamicApi.seedDefaultEndpoints();
+  }
+
+  @Delete('admin/cache')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Clear all dynamic API Redis cache' })
+  clearAllCache() {
+    return this.dynamicApi.clearCache().then(n => ({ cleared: n }));
+  }
+
+  @Delete('admin/cache/:symbol')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Clear Redis cache for a specific symbol' })
+  clearSymbolCache(@Param('symbol') symbol: string) {
+    return this.dynamicApi.clearCache(symbol).then(n => ({ cleared: n, symbol }));
   }
 }

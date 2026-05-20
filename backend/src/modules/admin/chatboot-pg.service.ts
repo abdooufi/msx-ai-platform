@@ -275,6 +275,26 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   // ─── API Endpoints ────────────────────────────────────────────────────────
 
+  async getApiEndpointById(id: string): Promise<any | null> {
+    const rows = await this.query(`SELECT * FROM api_endpoints WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async getApiEndpointByName(name: string): Promise<any | null> {
+    const rows = await this.query(
+      `SELECT * FROM api_endpoints WHERE name = $1 LIMIT 1`,
+      [name],
+    );
+    return rows[0] ?? null;
+  }
+
+  /** Return all active endpoints without pagination (for runtime matching) */
+  async getActiveApiEndpoints(): Promise<any[]> {
+    return this.query(
+      `SELECT * FROM api_endpoints WHERE is_active = true ORDER BY category, name`,
+    );
+  }
+
   async getApiEndpoints(page = 1, limit = 20, category?: string, activeOnly = false) {
     const offset  = (page - 1) * limit;
     const filters: string[] = [];

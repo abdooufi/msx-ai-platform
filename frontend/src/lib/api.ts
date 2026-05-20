@@ -132,6 +132,11 @@ export const getPgApiEndpoints   = (page = 1, limit = 20) =>
   api.get(`/admin/pg/api-endpoints?page=${page}&limit=${limit}`)
 export const upsertPgApiEndpoint = (body: object) => api.post('/admin/pg/api-endpoints', body)
 export const deletePgApiEndpoint = (id: string)   => api.delete(`/admin/pg/api-endpoints/${id}`)
+export const testPgApiEndpoint   = (id: string, symbol = 'OQEP') =>
+  api.post(`/admin/pg/api-endpoints/${id}/test?symbol=${symbol}`)
+export const seedPgApiEndpoints  = ()             => api.post('/admin/pg/api-endpoints/seed')
+export const clearApiCache       = (symbol?: string) =>
+  symbol ? api.delete(`/admin/admin/cache/${symbol}`) : api.delete('/admin/admin/cache')
 
 // ─── PG Companies ─────────────────────────────────────────────────
 export const getPgCompanies   = (page = 1, limit = 20, search?: string) => {
