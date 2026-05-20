@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { ChatbootPgService } from './chatboot-pg.service';
 import { Conversation, ConversationSchema } from '../../schemas/conversation.schema';
 import { AnalyticsEvent, AnalyticsEventSchema } from '../../schemas/analytics.schema';
 import { Knowledge, KnowledgeSchema } from '../../schemas/knowledge.schema';
@@ -15,6 +16,7 @@ import { Knowledge, KnowledgeSchema } from '../../schemas/knowledge.schema';
     ]),
   ],
   controllers: [AdminController],
-  providers: [AdminService],
+  providers: [AdminService, ChatbootPgService],
+  exports: [ChatbootPgService],
 })
 export class AdminModule {}

@@ -25,7 +25,7 @@ export class QdrantService implements OnModuleInit {
   constructor(private config: ConfigService) {
     this.baseUrl = config.get<string>('QDRANT_URL', 'http://localhost:6333');
     this.collection = config.get<string>('QDRANT_COLLECTION', 'msx_knowledge');
-    this.vectorSize = config.get<number>('QDRANT_COLLECTION_SIZE', 768);
+    this.vectorSize = parseInt(config.get('QDRANT_COLLECTION_SIZE', '768'), 10);
   }
 
   async onModuleInit() {
@@ -35,19 +35,38 @@ export class QdrantService implements OnModuleInit {
   /** Create the Qdrant collection if it doesn't exist */
   async ensureCollection(): Promise<void> {
     try {
-      // Check if exists
-      await axios.get(`${this.baseUrl}/collections/${this.collection}`);
-      this.logger.log(`✅ Qdrant collection "${this.collection}" exists`);
-    } catch {
-      // Create it
+      const res = await axios.get(
+        `${this.baseUrl}/collections/${this.collection}`,
+      );
+      if (res.data?.result) {
+        this.logger.log(`✅ Qdrant collection "${this.collection}" exists`);
+        return;
+      }
+    } catch (err: any) {
+      // 404 = doesn't exist yet — fall through to create
+      if (err?.response?.status !== 404) {
+        this.logger.warn(`Qdrant check failed: ${err?.message} — will try to create`);
+      }
+    }
+
+    try {
       await axios.put(`${this.baseUrl}/collections/${this.collection}`, {
         vectors: {
-          size: this.vectorSize,
+          size:     this.vectorSize,
           distance: 'Cosine',
         },
-        optimizers_config: { indexing_threshold: 1000 },
       });
       this.logger.log(`✅ Created Qdrant collection "${this.collection}"`);
+    } catch (err: any) {
+      // If already exists (409) that's fine — just log and continue
+      if (err?.response?.status === 409) {
+        this.logger.log(`✅ Qdrant collection "${this.collection}" already exists`);
+      } else {
+        this.logger.error(
+          `Failed to create Qdrant collection: ${err?.response?.data?.status?.error || err?.message}`,
+        );
+        // Don't crash the app — RAG will be unavailable but the rest still works
+      }
     }
   }
 

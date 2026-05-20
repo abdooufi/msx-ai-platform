@@ -66,6 +66,15 @@ export class ChatService {
       { role: 'user', content: dto.message },
     ];
 
+    // Set SSE headers BEFORE any write (headers must be sent before body)
+    if (!res.headersSent) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+    }
+
     // Add source info to SSE before streaming text
     res.write(
       `data: ${JSON.stringify({
@@ -101,6 +110,11 @@ export class ChatService {
       fullResponse = language === 'ar'
         ? 'عذراً، حدث خطأ. يرجى المحاولة مرة أخرى.'
         : 'Sorry, an error occurred. Please try again.';
+      // Send error event and close the SSE stream gracefully
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ error: fullResponse })}\n\n`);
+        res.end();
+      }
     }
 
     latencyMs = latencyMs || (Date.now() - start);

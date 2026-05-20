@@ -45,7 +45,7 @@ export class ScraperProcessor {
     maxDepth: number,
     job: Job,
   ): Promise<void> {
-    const maxPages = this.config.get<number>('SCRAPER_MAX_PAGES', 500);
+    const maxPages = parseInt(this.config.get('SCRAPER_MAX_PAGES', '500'), 10);
 
     if (
       this.visited.has(url) ||
@@ -57,11 +57,11 @@ export class ScraperProcessor {
     await job.progress(Math.round((this.visited.size / maxPages) * 100));
 
     const links = await this.processPage(url);
-    const delay = this.config.get<number>('SCRAPER_DELAY_MS', 1000);
+    const delay = parseInt(this.config.get('SCRAPER_DELAY_MS', '1000'), 10);
     await new Promise(r => setTimeout(r, delay));
 
     // Recursively crawl discovered links
-    const concurrency = this.config.get<number>('SCRAPER_CONCURRENCY', 3);
+    const concurrency = parseInt(this.config.get('SCRAPER_CONCURRENCY', '3'), 10);
     for (let i = 0; i < links.length; i += concurrency) {
       const batch = links.slice(i, i + concurrency);
       await Promise.all(

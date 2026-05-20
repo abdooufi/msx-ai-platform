@@ -40,8 +40,8 @@ export class RagService {
    * Text is split into chunks; each chunk gets its own vector.
    */
   async indexContent(input: IndexInput): Promise<number> {
-    const chunkSize = this.config.get<number>('RAG_CHUNK_SIZE', 512);
-    const overlap = this.config.get<number>('RAG_CHUNK_OVERLAP', 64);
+    const chunkSize = parseInt(this.config.get('RAG_CHUNK_SIZE', '512'), 10);
+    const overlap = parseInt(this.config.get('RAG_CHUNK_OVERLAP', '64'), 10);
     const chunks = this.embedding.chunkText(input.content, chunkSize, overlap);
 
     let indexed = 0;
@@ -107,8 +107,8 @@ export class RagService {
    * Returns formatted context string + source list.
    */
   async retrieve(query: string, language?: string): Promise<RagContext> {
-    const topK = this.config.get<number>('RAG_TOP_K', 5);
-    const threshold = this.config.get<number>('RAG_SCORE_THRESHOLD', 0.4);
+    const topK = parseInt(this.config.get('RAG_TOP_K', '5'), 10);
+    const threshold = parseFloat(this.config.get('RAG_SCORE_THRESHOLD', '0.4'));
 
     try {
       const queryVector = await this.embedding.embed(query);

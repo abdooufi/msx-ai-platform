@@ -37,7 +37,7 @@ export class ScraperService {
 
   /** Schedule daily recrawl */
   async scheduleRecrawl(): Promise<void> {
-    const hours = this.config.get<number>('SCRAPER_RECRAWL_HOURS', 24);
+    const hours = parseInt(this.config.get('SCRAPER_RECRAWL_HOURS', '24'), 10);
     const targetUrl = this.config.get<string>('SCRAPER_TARGET_URL', 'https://www.msx.om');
 
     await this.scraperQueue.add(
