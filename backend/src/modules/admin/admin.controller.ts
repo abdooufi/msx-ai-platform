@@ -8,6 +8,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/guards/roles.decorator';
 import { AdminService } from './admin.service';
 import { ChatbootPgService } from './chatboot-pg.service';
+import { PgIndexingService, IndexableTable } from './pg-indexing.service';
 import { LlmService, AiProvider } from '../rag/llm.service';
 
 @ApiTags('Admin')
@@ -19,6 +20,7 @@ export class AdminController {
   constructor(
     private readonly admin: AdminService,
     private readonly pg: ChatbootPgService,
+    private readonly pgIndexing: PgIndexingService,
     private readonly llm: LlmService,
   ) {}
 
@@ -310,5 +312,39 @@ export class AdminController {
   @ApiOperation({ summary: 'Delete a system setting' })
   deleteSystemSetting(@Param('key') key: string) {
     return this.pg.deleteSystemSetting(key);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PG → Qdrant Indexing
+  // ══════════════════════════════════════════════════════════════════════════
+
+  @Get('pg/index-status')
+  @ApiOperation({ summary: 'Get per-table Qdrant indexing status' })
+  getIndexStatus() {
+    return this.pgIndexing.getStatus();
+  }
+
+  @Post('pg/index-all')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Trigger full re-index of all PG tables into Qdrant (async)' })
+  indexAll() {
+    // Fire and forget — client polls /index-status for progress
+    this.pgIndexing.indexAll().catch(() => {});
+    return { message: 'Indexing started for all tables' };
+  }
+
+  @Post('pg/index/:table')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Trigger re-index for a single PG table (async)' })
+  indexTable(@Param('table') table: IndexableTable) {
+    this.pgIndexing.indexTable(table).catch(() => {});
+    return { message: `Indexing started for table: ${table}` };
+  }
+
+  @Delete('pg/index/:table')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Clear Qdrant vectors for a single PG table' })
+  clearTableIndex(@Param('table') table: IndexableTable) {
+    return this.pgIndexing.clearTableIndex(table);
   }
 }

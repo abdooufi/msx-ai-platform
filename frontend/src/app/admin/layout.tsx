@@ -5,7 +5,7 @@ import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import {
   LayoutDashboard, MessageSquare, FileText, TrendingUp,
-  Settings, Upload, Globe, Bot, LogOut, AlertCircle,
+  Settings, Globe, Bot, LogOut, AlertCircle, Database,
 } from 'lucide-react'
 import { useAuthStore } from '../../lib/store'
 import clsx from 'clsx'
@@ -15,6 +15,7 @@ const navItems = [
   { href: '/admin/conversations',  label: 'Conversations',  icon: MessageSquare },
   { href: '/admin/documents',      label: 'Documents',      icon: FileText },
   { href: '/admin/training',       label: 'Training',       icon: Globe },
+  { href: '/admin/knowledge',      label: 'Knowledge',      icon: Database },
   { href: '/admin/analytics',      label: 'Analytics',      icon: TrendingUp },
   { href: '/admin/failed',         label: 'Failed Q&A',     icon: AlertCircle },
   { href: '/admin/settings',       label: 'Settings',       icon: Settings },
