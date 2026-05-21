@@ -1,3 +1,27 @@
+export interface ChartPoint {
+  time: string
+  ltp: number
+  shares: number
+  turnover: number
+}
+
+export interface ChartSummary {
+  open: number
+  high: number
+  low: number
+  last: number
+  latestTime: string
+  totalShares: number
+  totalTurnover: number
+  tradesCount: number
+}
+
+export interface ChartData {
+  symbol: string
+  summary: ChartSummary
+  points: ChartPoint[]
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -9,6 +33,7 @@ export interface Message {
   latencyMs?: number
   feedback?: 'positive' | 'negative' | null
   isStreaming?: boolean
+  chartData?: ChartData
   createdAt: Date
 }
 

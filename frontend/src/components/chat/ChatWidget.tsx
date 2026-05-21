@@ -4,9 +4,14 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Bot, Send, X, Maximize2, Minimize2, Trash2, ThumbsUp, ThumbsDown, Globe, Search } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import {
+  AreaChart, Area, BarChart, Bar,
+  XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine,
+} from 'recharts'
 import { useChatStore } from '../../lib/store'
 import { streamChat, getSuggestions, submitFeedback, searchCompanySymbols } from '../../lib/api'
-import { Message } from '../../types'
+import { Message, ChartData } from '../../types'
 import clsx from 'clsx'
 
 interface CompanyOption {
@@ -114,6 +119,7 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
     let fullText = ''
     let sources = []
     let sessionLang: 'en' | 'ar' = language
+    let chartData: ChartData | undefined
 
     try {
       for await (const chunk of streamChat(msg, sessionId, history)) {
@@ -123,9 +129,13 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
           if (chunk.language) setLanguage(chunk.language as 'en' | 'ar')
           continue
         }
+        if (chunk.type === 'chart') {
+          chartData = chunk.chartData as ChartData
+          continue
+        }
         if (chunk.delta) {
           fullText += chunk.delta
-          updateMessage(assistantId, { content: fullText, isStreaming: true })
+          updateMessage(assistantId, { content: fullText, isStreaming: true, chartData })
         }
         if (chunk.done) {
           updateMessage(assistantId, {
@@ -134,6 +144,7 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
             sources,
             tokensUsed: chunk.tokensUsed,
             latencyMs: chunk.latencyMs,
+            chartData,
           })
         }
       }
@@ -428,6 +439,92 @@ function WelcomeScreen({
   )
 }
 
+// ─── Inline price chart rendered inside the chat bubble ──────────────────────
+
+function fmtVol(n: number) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M'
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K'
+  return n.toLocaleString()
+}
+
+function InlinePriceChart({ chartData, summary }: { chartData: ChartData; summary: string }) {
+  const { symbol, points, summary: s } = chartData
+  const isUp = s.last >= s.open
+  const color = isUp ? '#22c55e' : '#ef4444'
+  const pMin  = Math.min(...points.map(p => p.ltp))
+  const pMax  = Math.max(...points.map(p => p.ltp))
+  const pad   = (pMax - pMin) * 0.08 || 0.002
+
+  return (
+    <div className="w-full">
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2">
+        <div className="flex items-center justify-between mb-1">
+          <span className="font-bold text-white font-mono">{symbol}</span>
+          <span className={`text-lg font-bold font-mono ${isUp ? 'text-green-400' : 'text-red-400'}`}>
+            {s.last.toFixed(3)}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap">
+          <span>O <b className="text-gray-200">{s.open.toFixed(3)}</b></span>
+          <span>H <b className="text-green-300">{s.high.toFixed(3)}</b></span>
+          <span>L <b className="text-red-300">{s.low.toFixed(3)}</b></span>
+          <span className="ml-auto text-gray-500">🕐 {s.latestTime}</span>
+        </div>
+      </div>
+
+      {/* Price area chart */}
+      <ResponsiveContainer width="100%" height={140}>
+        <AreaChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id={`cg_${symbol}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="10%" stopColor={color} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={color} stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
+          <XAxis dataKey="time" tick={{ fill: '#6b7280', fontSize: 9 }} tickLine={false} axisLine={false}
+            interval="preserveStartEnd" minTickGap={50} />
+          <YAxis domain={[pMin - pad, pMax + pad]} tick={{ fill: '#6b7280', fontSize: 9 }}
+            tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(3)} width={46} />
+          <Tooltip
+            content={({ active, payload }) =>
+              active && payload?.length ? (
+                <div className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs shadow-lg">
+                  <p className="text-gray-400">{payload[0]?.payload?.time}</p>
+                  <p className="font-mono font-bold" style={{ color }}>{payload[0]?.payload?.ltp?.toFixed(3)}</p>
+                  <p className="text-gray-500">Vol: {fmtVol(payload[0]?.payload?.shares)}</p>
+                </div>
+              ) : null
+            }
+          />
+          <ReferenceLine y={s.open} stroke="#6b7280" strokeDasharray="3 2"
+            label={{ value: 'O', fill: '#6b7280', fontSize: 8, position: 'insideTopRight' }} />
+          <Area type="monotone" dataKey="ltp" stroke={color} strokeWidth={1.5}
+            fill={`url(#cg_${symbol})`} dot={false}
+            activeDot={{ r: 3, fill: color, strokeWidth: 0 }} />
+        </AreaChart>
+      </ResponsiveContainer>
+
+      {/* Volume bar chart */}
+      <ResponsiveContainer width="100%" height={50}>
+        <BarChart data={points} margin={{ top: 0, right: 4, bottom: 2, left: 0 }}>
+          <XAxis dataKey="time" hide />
+          <YAxis hide />
+          <Bar dataKey="shares" fill="#4b5563" radius={[1, 1, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+
+      {/* Footer stats */}
+      <div className="px-4 pb-3 pt-1 flex items-center gap-3 text-xs text-gray-500 border-t border-gray-700/50">
+        <span>{s.tradesCount} trades</span>
+        <span>Vol: <b className="text-gray-300">{fmtVol(s.totalShares)}</b></span>
+        <span>Turnover: <b className="text-gray-300">{s.totalTurnover.toFixed(0)} OMR</b></span>
+      </div>
+    </div>
+  )
+}
+
 function MessageBubble({
   msg, isRTL, onFeedback,
 }: { msg: Message; isRTL: boolean; onFeedback: (m: Message, f: 'positive' | 'negative') => void }) {
@@ -440,15 +537,18 @@ function MessageBubble({
       <div className={clsx('max-w-[82%]', isUser ? 'items-end' : 'items-start', 'flex flex-col')}>
         <div
           className={clsx(
-            'px-3.5 py-2.5 rounded-2xl text-sm',
+            'rounded-2xl text-sm overflow-hidden',
             isUser
-              ? 'bg-blue-700 text-white rounded-br-sm'
-              : clsx('bg-gray-800 border border-gray-700 text-gray-100 rounded-bl-sm', msg.isStreaming && 'streaming'),
+              ? 'bg-blue-700 text-white rounded-br-sm px-3.5 py-2.5'
+              : clsx('bg-gray-800 border border-gray-700 text-gray-100 rounded-bl-sm', msg.isStreaming && 'streaming',
+                  msg.chartData ? 'p-0' : 'px-3.5 py-2.5'),
           )}
           dir={isRTL ? 'rtl' : 'ltr'}
         >
           {isUser ? (
             <span>{msg.content}</span>
+          ) : msg.chartData ? (
+            <InlinePriceChart chartData={msg.chartData} summary={msg.content} />
           ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}

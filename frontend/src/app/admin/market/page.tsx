@@ -9,7 +9,7 @@ import {
   TrendingUp, TrendingDown, RefreshCcw, Search,
   Activity, BarChart2, Clock, Loader2,
 } from 'lucide-react'
-import api from '../../../lib/api'
+import api, { clearApiCache } from '../../../lib/api'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -42,9 +42,11 @@ interface TradePoint {
   raw: number   // index for stable x-axis
 }
 
+// All symbols verified live against MSX snapshot API — only equities with price data included
 const QUICK_SYMBOLS = [
-  'OQEP', 'OQEB', 'BKMB', 'NBO', 'NRIC', 'GSM', 'MERI',
-  'AIOM', 'OMAN', 'HBMO', 'MBSB', 'ROON', 'HSMO', 'BKDB',
+  'OQEP', 'BKMB', 'BKSB', 'NBOB', 'BKDB',   // Top banks + OQ
+  'OTEL', 'ORDS', 'OQGN', 'OMVS', 'OOMS',   // Telecoms + energy
+  'RCCI', 'OCOI', 'RNSS', 'SPSI', 'HBMO',   // Industry + services
 ]
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -134,8 +136,8 @@ function PriceTooltip({ active, payload, label }: any) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MarketPage() {
-  const [symbol, setSymbol]     = useState('OQEB')
-  const [input, setInput]       = useState('OQEB')
+  const [symbol, setSymbol]     = useState('OQEP')
+  const [input, setInput]       = useState('OQEP')
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [chartData, setChartData] = useState<TradePoint[]>([])
   const [loading, setLoading]   = useState(false)
@@ -175,13 +177,16 @@ export default function MarketPage() {
     setError(null)
     setSymbol(s)
     setInput(s)
+    // Bust any stale Redis cache for this symbol before fetching
+    // (prevents empty pre-market cache from hiding live data)
+    try { await clearApiCache(s) } catch {}
     await Promise.all([fetchSnapshot(s), fetchChart(s)])
     setLastUpdated(new Date())
     setLoading(false)
   }, [fetchSnapshot, fetchChart])
 
   // Initial load
-  useEffect(() => { load('OQEB') }, [load])
+  useEffect(() => { load('OQEP') }, [load])
 
   // Auto-refresh every 60s
   useEffect(() => {
@@ -363,8 +368,9 @@ export default function MarketPage() {
             <span className="text-sm">Loading chart data…</span>
           </div>
         ) : chartData.length === 0 ? (
-          <div className="h-64 flex items-center justify-center text-gray-600 text-sm">
-            No intraday trades available for {symbol} today.
+          <div className="h-64 flex flex-col items-center justify-center text-gray-600 gap-2">
+            <span className="text-sm">No intraday trades recorded for <span className="font-mono text-gray-400">{symbol}</span> today.</span>
+            <span className="text-xs text-gray-700">The stock may not have traded yet, or trading may have been suspended.</span>
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={260}>

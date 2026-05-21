@@ -144,11 +144,11 @@ export class ChatService {
       this.logger.log(`Live data injected for symbol: ${symbol}`);
     }
 
-    // 4b. Chart fast-path — bypass LLM entirely when we have real trade data.
-    //     Small LLMs refuse "draw chart" requests; we stream the formatted data directly.
-    if (symbol && this.isChartRequest(dto.message) && liveData?.includes('Intraday Chart')) {
-      const chartBlock = this.extractChartBlock(liveData);
-      if (chartBlock) {
+    // 4b. Chart fast-path — bypass LLM, send structured chart data for the frontend to render.
+    if (symbol && this.isChartRequest(dto.message)) {
+      const rawChart = await this.dynamicApi.getChartData(symbol).catch(() => null);
+      const chartPayload = rawChart ? this.buildChartPayload(symbol, rawChart) : null;
+      if (chartPayload && chartPayload.points.length > 0) {
         if (!res.headersSent) {
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -156,16 +156,27 @@ export class ChatService {
           res.setHeader('X-Accel-Buffering', 'no');
           res.flushHeaders();
         }
+        const s = chartPayload.summary;
+        const textSummary =
+          `**${symbol.toUpperCase()} — Intraday Chart** (${s.tradesCount} trades)\n\n` +
+          `| | |\n|---|---|\n` +
+          `| 🕐 Latest | **${s.latestTime}** · **${s.last.toFixed(3)} OMR** |\n` +
+          `| Open | ${s.open.toFixed(3)} |\n` +
+          `| High | ${s.high.toFixed(3)} |\n` +
+          `| Low  | ${s.low.toFixed(3)} |\n` +
+          `| Volume | ${s.totalShares.toLocaleString()} shares |\n` +
+          `| Turnover | ${s.totalTurnover.toFixed(3)} OMR |`;
+
         res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
-        // Stream word-by-word for a natural feel
-        for (const line of chartBlock.split('\n')) {
-          res.write(`data: ${JSON.stringify({ delta: line + '\n' })}\n\n`);
-        }
+        // Send the chart data payload for the frontend chart renderer
+        res.write(`data: ${JSON.stringify({ type: 'chart', chartData: chartPayload })}\n\n`);
+        // Send text summary as normal delta so it shows in the message
+        res.write(`data: ${JSON.stringify({ delta: textSummary })}\n\n`);
         const latencyMs = Date.now() - start;
         res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs, provider: 'direct' })}\n\n`);
         res.end();
         await this.persistMessage(sessionId, dto, {
-          response: chartBlock, language, sources: [], tokensUsed: 0, latencyMs,
+          response: textSummary, language, sources: [], tokensUsed: 0, latencyMs,
         });
         return;
       }
@@ -355,19 +366,59 @@ export class ChatService {
 
   /** True when the user's message is a chart/graph request */
   private isChartRequest(message: string): boolean {
-    return /\b(chart|graph|intraday|candlestick|رسم\s*بياني|مخطط|بياني)\b/i.test(message);
+    return /\b(chart|graph|intraday|candlestick|draw|plot|رسم\s*بياني|مخطط|بياني|ارسم)\b/i.test(message);
   }
 
-  /**
-   * Pull the "Intraday Chart" section out of the liveData string that
-   * DynamicApiService produced so we can stream it directly.
-   */
-  private extractChartBlock(liveData: string): string | null {
-    const idx = liveData.indexOf('📈 Intraday Chart');
-    if (idx === -1) return null;
-    // Everything from the chart header to the end (or next section separator)
-    const section = liveData.slice(idx).split('\n\n🔹')[0].trim();
-    return section || null;
+  /** Parse raw MSX chart-data.aspx response into typed payload for frontend rendering */
+  private buildChartPayload(symbol: string, raw: any): {
+    symbol: string;
+    summary: { open: number; high: number; low: number; last: number; latestTime: string; totalShares: number; totalTurnover: number; tradesCount: number };
+    points: Array<{ time: string; ltp: number; shares: number; turnover: number }>;
+  } | null {
+    const arr: any[] = Array.isArray(raw) ? raw
+      : Array.isArray(raw?.d) ? raw.d
+      : [];
+    if (!arr.length) return null;
+
+    const points = arr
+      .map(r => {
+        const year   = Number(r.Year   ?? 2000);
+        const month  = Number(r.Month  ?? 1);
+        const day    = Number(r.Day    ?? 1);
+        const h      = Number(r.Hour   ?? 0);
+        const min    = Number(r.Minute ?? 0);
+        const ltp    = parseFloat(r.LTP ?? 0);
+        const shares = parseInt(r.Volume ?? r.Value ?? 0, 10);
+        const turnover = parseFloat(r.Turnover) > 0
+          ? parseFloat(r.Turnover)
+          : parseFloat((ltp * shares).toFixed(3));
+        const sortKey = year * 100_000_000 + month * 1_000_000 + day * 10_000 + h * 100 + min;
+        const time = `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
+        return { time, ltp, shares, turnover, sortKey };
+      })
+      .filter(p => p.ltp > 0)
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .map(({ time, ltp, shares, turnover }) => ({ time, ltp, shares, turnover }));
+
+    if (!points.length) return null;
+
+    const first = points[0];
+    const last  = points[points.length - 1];
+    const high  = points.reduce((m, p) => Math.max(m, p.ltp), 0);
+    const low   = points.reduce((m, p) => Math.min(m, p.ltp), Infinity);
+    const totalShares   = points.reduce((s, p) => s + p.shares, 0);
+    const totalTurnover = points.reduce((s, p) => s + p.turnover, 0);
+
+    return {
+      symbol: symbol.toUpperCase(),
+      summary: {
+        open: first.ltp, high, low, last: last.ltp,
+        latestTime: last.time,
+        totalShares, totalTurnover: parseFloat(totalTurnover.toFixed(3)),
+        tradesCount: points.length,
+      },
+      points,
+    };
   }
 
   async getSuggestions(language: 'ar' | 'en' | 'mixed') {

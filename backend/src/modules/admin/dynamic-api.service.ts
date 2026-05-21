@@ -254,11 +254,22 @@ const DEFAULT_ENDPOINTS = [
 const TICKER_RE = /\b([A-Z]{2,6})\b/g;
 
 // ─── Common MSX stock symbols (fast lookup without DB hit) ───────────────────
+// Verified live against MSX snapshot.aspx/company — returns valid LTP
 const KNOWN_SYMBOLS = new Set([
-  'OQEP','BKMB','BNK','NBO','NRIC','GSM','MERI','AIOM','OMAN',
-  'ORPIC','OMVST','ABOB','ABOJ','HBMO','MBSB','UASC','DCOR',
-  'OQAPC','SCBX','SMEF','ROON','HSMO','BKDB','CMSC',
-  'MSM30','MFI','MSI','IFI', // indices
+  // Banking
+  'BKMB','BKDB','BKSB','NBOB','OAB','BKNZ','BKIZ','HBMO','ABOB',
+  // Energy / Oil & Gas
+  'OQEP','OQGN','OQBI','OOMS','MHAS','SOMS',
+  // Telecoms
+  'OTEL','ORDS',
+  // Finance / Investment
+  'OMVS','NFCI','OIFC','AMAN',
+  // Industry / Manufacturing
+  'RCCI','OCAI','OCOI','OFMI','NGCI','CGPI',
+  // Services / Others
+  'RNSS','SPSI','GHOS','LIVA','GECS','PHPC','AFIC','OUIC','MCTI','DICS','VISN','TAOI',
+  // Indices
+  'MSM30','MSX30','MFI','MSI','IFI',
 ]);
 
 @Injectable()
@@ -391,8 +402,12 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    // Cache the result
-    if (this.redis && data !== null) {
+    // Cache the result — skip nulls and empty arrays so a "no data yet"
+    // state (e.g. before market opens) is never frozen in Redis.
+    const isMeaningful =
+      data !== null &&
+      !(Array.isArray(data) && data.length === 0);
+    if (this.redis && isMeaningful) {
       try {
         await this.redis.set(cacheKey, JSON.stringify(data), 'EX', ttl);
       } catch { /* non-fatal */ }

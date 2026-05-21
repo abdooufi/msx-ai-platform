@@ -69,18 +69,32 @@ export async function* streamChat(
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
+  // Buffer incomplete lines across TCP chunks — critical for large chart payloads
+  let buffer = ''
 
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    const text = decoder.decode(value)
-    const lines = text.split('\n').filter(l => l.startsWith('data: '))
+
+    buffer += decoder.decode(value, { stream: true })
+
+    // Split on newlines but keep any trailing incomplete line in the buffer
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''   // last element may be incomplete — save for next read
+
     for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const payload = line.slice(6).trim()
+      if (!payload || payload === '[DONE]') continue
       try {
-        const data = JSON.parse(line.slice(6))
-        yield data
-      } catch { /* partial chunk */ }
+        yield JSON.parse(payload)
+      } catch { /* malformed line — skip */ }
     }
+  }
+
+  // Flush any remaining data in the buffer
+  if (buffer.startsWith('data: ')) {
+    try { yield JSON.parse(buffer.slice(6).trim()) } catch {}
   }
 }
 
