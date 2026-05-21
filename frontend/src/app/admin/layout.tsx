@@ -6,7 +6,7 @@ import Link from 'next/link'
 import {
   LayoutDashboard, MessageSquare, FileText, TrendingUp,
   Settings, Globe, Bot, LogOut, AlertCircle, Database,
-  HardDrive, Building2, HelpCircle, LineChart,
+  HardDrive, Building2, HelpCircle, LineChart, Users, ClipboardList,
 } from 'lucide-react'
 import { useAuthStore } from '../../lib/store'
 import clsx from 'clsx'
@@ -19,10 +19,12 @@ const navItems = [
   { href: '/admin/knowledge',      label: 'Knowledge',      icon: Database },
   { href: '/admin/companies',      label: 'Companies',      icon: Building2 },
   { href: '/admin/unanswered',     label: 'Unanswered',     icon: HelpCircle },
-  { href: '/admin/market',          label: 'Market Chart',   icon: LineChart },
+  { href: '/admin/market',         label: 'Market Chart',   icon: LineChart },
   { href: '/admin/analytics',      label: 'Analytics',      icon: TrendingUp },
   { href: '/admin/failed',         label: 'Failed Q&A',     icon: AlertCircle },
   { href: '/admin/cache',          label: 'Cache',          icon: HardDrive },
+  { href: '/admin/users',          label: 'Users',          icon: Users },
+  { href: '/admin/logs',           label: 'Audit Logs',     icon: ClipboardList },
   { href: '/admin/settings',       label: 'Settings',       icon: Settings },
 ]
 

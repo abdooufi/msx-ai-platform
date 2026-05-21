@@ -1,10 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
 import { ConfigService } from '@nestjs/config';
 import { EmbeddingService } from './embedding.service';
 import { QdrantService, SearchResult } from './qdrant.service';
-import { Knowledge, KnowledgeDocument, KnowledgeType } from '../../schemas/knowledge.schema';
+import { AppPgService } from '../database/app-pg.service';
+import { KnowledgeType } from '../../schemas/knowledge.schema';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface IndexInput {
@@ -29,14 +28,14 @@ export class RagService {
   private readonly logger = new Logger(RagService.name);
 
   constructor(
-    @InjectModel(Knowledge.name) private knowledgeModel: Model<KnowledgeDocument>,
+    private pg: AppPgService,
     private embedding: EmbeddingService,
     private qdrant: QdrantService,
     private config: ConfigService,
   ) {}
 
   /**
-   * Index a piece of text into Qdrant + MongoDB.
+   * Index a piece of text into Qdrant + PostgreSQL.
    * Text is split into chunks; each chunk gets its own vector.
    */
   async indexContent(input: IndexInput): Promise<number> {
@@ -73,24 +72,19 @@ export class RagService {
           },
         }]);
 
-        // Save to MongoDB (upsert by sourceId + chunkIndex)
-        await this.knowledgeModel.findOneAndUpdate(
-          { sourceId: input.sourceId, chunkIndex: i },
-          {
-            title: input.title,
-            content: chunk,
-            sourceId: input.sourceId,
-            type: input.type,
-            url: input.url,
-            language: input.language,
-            tags: input.tags,
-            qdrantId,
-            isActive: true,
-            lastIndexedAt: new Date(),
-            metadata: input.metadata,
-          },
-          { upsert: true },
-        );
+        // Upsert into PostgreSQL
+        await this.pg.upsertKnowledgeChunk({
+          title:      input.title,
+          content:    chunk,
+          chunkIndex: i,
+          sourceId:   input.sourceId,
+          type:       input.type,
+          url:        input.url,
+          language:   input.language,
+          tags:       input.tags,
+          qdrantId,
+          metadata:   input.metadata,
+        });
 
         indexed++;
       } catch (err) {
@@ -159,15 +153,15 @@ export class RagService {
   /** Delete all knowledge from a specific source (e.g. re-crawl) */
   async deleteSource(sourceId: string): Promise<void> {
     await this.qdrant.deleteByField('sourceId', sourceId);
-    await this.knowledgeModel.deleteMany({ sourceId });
+    await this.pg.deleteKnowledgeBySource(sourceId);
     this.logger.log(`Deleted all knowledge for source: ${sourceId}`);
   }
 
   async getStats() {
-    const [qdrantCount, mongoCount] = await Promise.all([
+    const [qdrantCount, pgDocuments] = await Promise.all([
       this.qdrant.count(),
-      this.knowledgeModel.countDocuments({ isActive: true }),
+      this.pg.countActiveKnowledge(),
     ]);
-    return { qdrantVectors: qdrantCount, mongoDocuments: mongoCount };
+    return { qdrantVectors: qdrantCount, pgDocuments };
   }
 }

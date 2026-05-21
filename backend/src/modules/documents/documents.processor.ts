@@ -1,19 +1,13 @@
 import { Processor, Process, OnQueueFailed } from '@nestjs/bull';
 import { Job } from 'bull';
 import { Logger } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
 import { readFileSync } from 'fs';
 import { extname } from 'path';
 import * as pdfParse from 'pdf-parse';
 import * as mammoth from 'mammoth';
 import { RagService } from '../rag/rag.service';
+import { AppPgService } from '../database/app-pg.service';
 import { KnowledgeType } from '../../schemas/knowledge.schema';
-import {
-  UploadedDocument,
-  UploadedDocumentDocument,
-  DocStatus,
-} from '../../schemas/uploaded-document.schema';
 import { DOCUMENTS_QUEUE } from './documents.constants';
 
 @Processor(DOCUMENTS_QUEUE)
@@ -21,8 +15,7 @@ export class DocumentsProcessor {
   private readonly logger = new Logger(DocumentsProcessor.name);
 
   constructor(
-    @InjectModel(UploadedDocument.name)
-    private docModel: Model<UploadedDocumentDocument>,
+    private pg: AppPgService,
     private rag: RagService,
   ) {}
 
@@ -32,7 +25,7 @@ export class DocumentsProcessor {
   ) {
     const { docId, filePath, mimeType, title } = job.data;
 
-    await this.docModel.findByIdAndUpdate(docId, { status: DocStatus.PROCESSING });
+    await this.pg.updateDocumentStatus(docId, { status: 'processing' });
 
     try {
       const text = await this.extractText(filePath, mimeType);
@@ -49,17 +42,17 @@ export class DocumentsProcessor {
         metadata: { docId, mimeType },
       });
 
-      await this.docModel.findByIdAndUpdate(docId, {
-        status: DocStatus.INDEXED,
+      await this.pg.updateDocumentStatus(docId, {
+        status:        'indexed',
         chunksIndexed,
-        processedAt: new Date(),
+        processedAt:   new Date(),
       });
 
       this.logger.log(`✅ Indexed document ${title} → ${chunksIndexed} chunks`);
     } catch (err) {
       this.logger.error(`Failed to process document ${docId}: ${err.message}`);
-      await this.docModel.findByIdAndUpdate(docId, {
-        status: DocStatus.FAILED,
+      await this.pg.updateDocumentStatus(docId, {
+        status:       'failed',
         errorMessage: err.message,
       });
       throw err;

@@ -1,6 +1,6 @@
 import {
   Controller, Get, Post, Put, Patch, Delete,
-  Body, Param, Query, UseGuards, HttpCode, HttpStatus,
+  Body, Param, Query, UseGuards, HttpCode, HttpStatus, Request,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -11,11 +11,13 @@ import { ChatbootPgService } from './chatboot-pg.service';
 import { PgIndexingService, IndexableTable } from './pg-indexing.service';
 import { DynamicApiService } from './dynamic-api.service';
 import { LlmService, AiProvider } from '../rag/llm.service';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '../../schemas/audit-log.schema';
 
 @ApiTags('Admin')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('admin', 'agent')
+@Roles('admin', 'agent', 'super_admin', 'editor')
 @Controller('admin')
 export class AdminController {
   constructor(
@@ -24,6 +26,7 @@ export class AdminController {
     private readonly pgIndexing: PgIndexingService,
     private readonly dynamicApi: DynamicApiService,
     private readonly llm: LlmService,
+    private readonly audit: AuditService,
   ) {}
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -71,8 +74,13 @@ export class AdminController {
 
   @Post('ai-provider')
   @ApiOperation({ summary: 'Switch AI provider at runtime (no restart needed)' })
-  setAiProvider(@Body() body: { provider: AiProvider }) {
-    return this.llm.setProvider(body.provider);
+  async setAiProvider(@Body() body: { provider: AiProvider }, @Request() req) {
+    const result = await this.llm.setProvider(body.provider);
+    await this.audit.log(AuditService.ctx(req), {
+      action: AuditAction.AI_PROVIDER_CHANGE, resource: 'settings',
+      details: `Switched AI provider to ${body.provider}`,
+    });
+    return result;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -116,15 +124,31 @@ export class AdminController {
 
   @Post('pg/companies')
   @ApiOperation({ summary: 'Create or update a company (include id to update)' })
-  upsertCompany(@Body() body: any) {
-    return this.pg.upsertCompany(body);
+  async upsertCompany(@Body() body: any, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.upsertCompany(body, ctx.userEmail);
+    const isUpdate = !!body.id;
+    await this.audit.log(ctx, {
+      action:     isUpdate ? AuditAction.COMPANY_UPDATE : AuditAction.COMPANY_CREATE,
+      resource:   'company',
+      resourceId: body.id ?? result[0]?.id,
+      details:    `${isUpdate ? 'Updated' : 'Created'} company ${body.symbol ?? body.id}`,
+      changes:    isUpdate ? { after: body } : { after: body },
+    });
+    return result;
   }
 
   @Delete('pg/companies/:id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a company' })
-  deleteCompany(@Param('id') id: string) {
-    return this.pg.deleteCompany(id);
+  async deleteCompany(@Param('id') id: string, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.deleteCompany(id);
+    await this.audit.log(ctx, {
+      action: AuditAction.COMPANY_DELETE, resource: 'company', resourceId: id,
+      details: `Deleted company ${id}`,
+    });
+    return result;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -148,15 +172,31 @@ export class AdminController {
 
   @Post('pg/faqs')
   @ApiOperation({ summary: 'Create or update FAQ (include id to update)' })
-  upsertFaq(@Body() body: any) {
-    return this.pg.upsertFaq(body);
+  async upsertFaq(@Body() body: any, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.upsertFaq(body, ctx.userEmail);
+    const isUpdate = !!body.id;
+    await this.audit.log(ctx, {
+      action:     isUpdate ? AuditAction.FAQ_UPDATE : AuditAction.FAQ_CREATE,
+      resource:   'faq',
+      resourceId: body.id ?? result[0]?.id,
+      details:    `${isUpdate ? 'Updated' : 'Created'} FAQ: ${(body.question ?? '').slice(0, 80)}`,
+      changes:    { after: { question: body.question, category: body.category } },
+    });
+    return result;
   }
 
   @Delete('pg/faqs/:id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a FAQ' })
-  deleteFaq(@Param('id') id: string) {
-    return this.pg.deleteFaq(id);
+  async deleteFaq(@Param('id') id: string, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.deleteFaq(id);
+    await this.audit.log(ctx, {
+      action: AuditAction.FAQ_DELETE, resource: 'faq', resourceId: id,
+      details: `Deleted FAQ ${id}`,
+    });
+    return result;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -186,15 +226,31 @@ export class AdminController {
 
   @Post('pg/knowledge-base')
   @ApiOperation({ summary: 'Create or update knowledge base entry (include id to update)' })
-  upsertKnowledge(@Body() body: any) {
-    return this.pg.upsertKnowledge(body);
+  async upsertKnowledge(@Body() body: any, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.upsertKnowledge(body, ctx.userEmail);
+    const isUpdate = !!body.id;
+    await this.audit.log(ctx, {
+      action:     isUpdate ? AuditAction.KB_UPDATE : AuditAction.KB_CREATE,
+      resource:   'knowledge_base',
+      resourceId: body.id ?? result[0]?.id,
+      details:    `${isUpdate ? 'Updated' : 'Created'} KB entry: ${(body.title ?? '').slice(0, 80)}`,
+      changes:    { after: { title: body.title, category: body.category } },
+    });
+    return result;
   }
 
   @Delete('pg/knowledge-base/:id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a knowledge base entry' })
-  deleteKnowledge(@Param('id') id: string) {
-    return this.pg.deleteKnowledge(id);
+  async deleteKnowledge(@Param('id') id: string, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.deleteKnowledge(id);
+    await this.audit.log(ctx, {
+      action: AuditAction.KB_DELETE, resource: 'knowledge_base', resourceId: id,
+      details: `Deleted KB entry ${id}`,
+    });
+    return result;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -279,15 +335,31 @@ export class AdminController {
 
   @Post('pg/api-endpoints')
   @ApiOperation({ summary: 'Create or update API endpoint (include id to update)' })
-  upsertApiEndpoint(@Body() body: any) {
-    return this.pg.upsertApiEndpoint(body);
+  async upsertApiEndpoint(@Body() body: any, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.upsertApiEndpoint(body, ctx.userEmail);
+    const isUpdate = !!body.id;
+    await this.audit.log(ctx, {
+      action:     isUpdate ? AuditAction.ENDPOINT_UPDATE : AuditAction.ENDPOINT_CREATE,
+      resource:   'api_endpoint',
+      resourceId: body.id ?? result[0]?.id,
+      details:    `${isUpdate ? 'Updated' : 'Created'} endpoint: ${body.name}`,
+      changes:    { after: { name: body.name, url: body.url, method: body.method } },
+    });
+    return result;
   }
 
   @Delete('pg/api-endpoints/:id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete an API endpoint configuration' })
-  deleteApiEndpoint(@Param('id') id: string) {
-    return this.pg.deleteApiEndpoint(id);
+  async deleteApiEndpoint(@Param('id') id: string, @Request() req) {
+    const ctx = AuditService.ctx(req);
+    const result = await this.pg.deleteApiEndpoint(id);
+    await this.audit.log(ctx, {
+      action: AuditAction.ENDPOINT_DELETE, resource: 'api_endpoint', resourceId: id,
+      details: `Deleted endpoint ${id}`,
+    });
+    return result;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -374,15 +446,25 @@ export class AdminController {
   @Delete('admin/cache')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Clear all dynamic API Redis cache' })
-  clearAllCache() {
-    return this.dynamicApi.clearCache().then(n => ({ cleared: n }));
+  async clearAllCache(@Request() req) {
+    const n = await this.dynamicApi.clearCache();
+    await this.audit.log(AuditService.ctx(req), {
+      action: AuditAction.CACHE_CLEAR, resource: 'cache',
+      details: `Cleared all Redis cache (${n} keys)`,
+    });
+    return { cleared: n };
   }
 
   @Delete('admin/cache/:symbol')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Clear Redis cache for a specific symbol' })
-  clearSymbolCache(@Param('symbol') symbol: string) {
-    return this.dynamicApi.clearCache(symbol).then(n => ({ cleared: n, symbol }));
+  async clearSymbolCache(@Param('symbol') symbol: string, @Request() req) {
+    const n = await this.dynamicApi.clearCache(symbol);
+    await this.audit.log(AuditService.ctx(req), {
+      action: AuditAction.CACHE_CLEAR, resource: 'cache',
+      details: `Cleared Redis cache for symbol ${symbol} (${n} keys)`,
+    });
+    return { cleared: n, symbol };
   }
 
   @Get('cache/stats')

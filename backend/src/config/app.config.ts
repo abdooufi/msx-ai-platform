@@ -11,10 +11,6 @@ export const appConfig = registerAs('app', () => ({
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
 
-  mongo: {
-    uri: process.env.MONGO_URI || 'mongodb://localhost:27017/msx_ai',
-  },
-
   redis: {
     url: process.env.REDIS_URL || 'redis://localhost:6379',
   },

@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
 import { BullModule } from '@nestjs/bull';
 import { MulterModule } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -8,16 +7,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { DocumentsController } from './documents.controller';
 import { DocumentsService } from './documents.service';
 import { DocumentsProcessor } from './documents.processor';
-import { UploadedDocument, UploadedDocumentSchema } from '../../schemas/uploaded-document.schema';
 import { DOCUMENTS_QUEUE } from './documents.constants';
 
 export { DOCUMENTS_QUEUE } from './documents.constants';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: UploadedDocument.name, schema: UploadedDocumentSchema },
-    ]),
     BullModule.registerQueue({ name: DOCUMENTS_QUEUE }),
     MulterModule.register({
       storage: diskStorage({

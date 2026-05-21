@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bull';
 import { AuthModule } from './modules/auth/auth.module';
@@ -10,36 +9,25 @@ import { ScraperModule } from './modules/scraper/scraper.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { AuditModule } from './modules/audit/audit.module';
+import { DatabaseModule } from './modules/database/database.module';
 import { HealthController } from './modules/health/health.controller';
 import { appConfig } from './config/app.config';
 
 @Module({
   controllers: [HealthController],
   imports: [
-    // ─── Config ───────────────────────────────────────────────────
+    // ─── Config ───────────────────────────────────────────────
     ConfigModule.forRoot({
       isGlobal: true,
       load: [appConfig],
       envFilePath: ['.env', '.env.local'],
     }),
 
-    // ─── MongoDB ──────────────────────────────────────────────────
-    MongooseModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (cs: ConfigService) => ({
-        uri: cs.get<string>('MONGO_URI'),
-        retryAttempts: 5,
-        retryDelay: 3000,
-        connectionFactory: (conn) => {
-          conn.on('connected', () => console.log('✅ MongoDB connected'));
-          conn.on('error', (e) => console.error('❌ MongoDB error:', e));
-          return conn;
-        },
-      }),
-    }),
+    // ─── PostgreSQL (app tables) ──────────────────────────────
+    DatabaseModule,
 
-    // ─── Rate limiting ────────────────────────────────────────────
+    // ─── Rate limiting ────────────────────────────────────────
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -51,7 +39,7 @@ import { appConfig } from './config/app.config';
       }),
     }),
 
-    // ─── Redis / BullMQ ───────────────────────────────────────────
+    // ─── Redis / BullMQ ───────────────────────────────────────
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -66,7 +54,7 @@ import { appConfig } from './config/app.config';
       }),
     }),
 
-    // ─── Feature modules ──────────────────────────────────────────
+    // ─── Feature modules ──────────────────────────────────────
     AuthModule,
     ChatModule,
     RagModule,
@@ -74,6 +62,7 @@ import { appConfig } from './config/app.config';
     DocumentsModule,
     AnalyticsModule,
     AdminModule,
+    AuditModule,
   ],
 })
 export class AppModule {}

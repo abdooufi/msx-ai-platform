@@ -1,79 +1,97 @@
-import { Injectable, UnauthorizedException, ConflictException, OnModuleInit } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import {
+  Injectable, UnauthorizedException, ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
-import { User, UserDocument, UserRole } from '../../schemas/user.schema';
+import { AppPgService } from '../database/app-pg.service';
+import { UserRole } from '../../schemas/user.schema';
+
+export { UserRole };
 
 @Injectable()
-export class AuthService implements OnModuleInit {
+export class AuthService {
   constructor(
-    @InjectModel(User.name) private userModel: Model<UserDocument>,
+    private pg: AppPgService,
     private jwt: JwtService,
-    private config: ConfigService,
   ) {}
 
-  /** Seed default admin account on startup */
-  async onModuleInit() {
-    const email = this.config.get<string>('ADMIN_EMAIL', 'admin@msx.om');
-    const password = this.config.get<string>('ADMIN_PASSWORD', 'Admin123!');
-    const exists = await this.userModel.findOne({ email });
-    if (!exists) {
-      const hash = await bcrypt.hash(password, 12);
-      await this.userModel.create({
-        email,
-        password: hash,
-        name: 'Administrator',
-        role: UserRole.ADMIN,
-      });
-      console.log(`✅ Admin account created: ${email}`);
-    }
-  }
+  // ─── Auth ─────────────────────────────────────────────────────────────────
 
   async login(email: string, password: string) {
-    const user = await this.userModel
-      .findOne({ email: email.toLowerCase(), isActive: true })
-      .select('+password')
-      .lean();
+    const user = await this.pg.findUserByEmail(email, true);
 
     if (!user || !(await bcrypt.compare(password, user.password))) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    await this.userModel.updateOne({ _id: user._id }, { lastLoginAt: new Date() });
+    await this.pg.updateUserLastLogin(user.id);
 
-    const payload = { sub: user._id.toString(), email: user.email, role: user.role };
-    const token = this.jwt.sign(payload);
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    const token   = this.jwt.sign(payload);
 
     return {
       accessToken: token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-      },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role },
     };
   }
 
-  async validateToken(payload: any): Promise<UserDocument | null> {
-    return this.userModel.findById(payload.sub).lean() as any;
+  async validateToken(payload: any): Promise<any | null> {
+    return this.pg.findUserById(payload.sub);
   }
 
-  async createUser(email: string, password: string, name: string, role: UserRole) {
-    const exists = await this.userModel.findOne({ email: email.toLowerCase() });
+  // ─── User management ─────────────────────────────────────────────────────
+
+  async createUser(data: {
+    email: string; password: string; name: string; role: UserRole;
+  }) {
+    const exists = await this.pg.findUserByEmail(data.email);
     if (exists) throw new ConflictException('Email already exists');
-    const hash = await bcrypt.hash(password, 12);
-    return this.userModel.create({ email: email.toLowerCase(), password: hash, name, role });
+    return this.pg.createUser({
+      email:    data.email,
+      password: data.password,
+      name:     data.name,
+      role:     data.role,
+    });
+  }
+
+  async updateUser(id: string, data: {
+    name?: string; role?: UserRole; isActive?: boolean;
+  }) {
+    const before = await this.pg.findUserById(id);
+    if (!before) throw new NotFoundException('User not found');
+
+    const updated = await this.pg.updateUser(id, {
+      name:     data.name,
+      role:     data.role,
+      isActive: data.isActive,
+    });
+
+    const after = { name: updated?.name, role: updated?.role, isActive: updated?.is_active };
+    const beforeSnapshot = { name: before.name, role: before.role, isActive: before.is_active };
+
+    return { user: updated, before: beforeSnapshot, after };
+  }
+
+  async changePassword(id: string, newPassword: string) {
+    const user = await this.pg.findUserById(id);
+    if (!user) throw new NotFoundException('User not found');
+    return this.pg.changeUserPassword(id, newPassword);
+  }
+
+  async deleteUser(id: string) {
+    const deleted = await this.pg.deleteUser(id);
+    if (!deleted) throw new NotFoundException('User not found');
+    return { ok: true, deleted };
   }
 
   async listUsers(page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
-    const [users, total] = await Promise.all([
-      this.userModel.find().select('-password').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      this.userModel.countDocuments(),
-    ]);
-    return { users, total, page };
+    return this.pg.listUsers(page, limit);
+  }
+
+  async getUser(id: string) {
+    const user = await this.pg.findUserById(id);
+    if (!user) throw new NotFoundException('User not found');
+    return user;
   }
 }

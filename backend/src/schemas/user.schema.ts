@@ -1,43 +1,17 @@
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
-
-export type UserDocument = User & Document;
+// Enums only — no Mongoose. All persistence is via PostgreSQL (AppPgService).
 
 export enum UserRole {
-  ADMIN = 'admin',
-  AGENT = 'agent',
-  USER = 'user',
+  SUPER_ADMIN = 'super_admin',
+  ADMIN       = 'admin',
+  EDITOR      = 'editor',
+  VIEWER      = 'viewer',
+  AGENT       = 'agent',
 }
 
-@Schema({ timestamps: true, collection: 'users' })
-export class User {
-  @Prop({ required: true, unique: true, lowercase: true, trim: true })
-  email: string;
-
-  @Prop({ required: true, select: false }) // never returned in queries
-  password: string;
-
-  @Prop({ required: true })
-  name: string;
-
-  @Prop({ enum: UserRole, default: UserRole.USER })
-  role: UserRole;
-
-  @Prop({ default: true })
-  isActive: boolean;
-
-  @Prop({ default: null })
-  lastLoginAt: Date;
-
-  @Prop({ default: null })
-  refreshToken: string;
-
-  @Prop({ type: Object, default: {} })
-  preferences: Record<string, any>;
-}
-
-export const UserSchema = SchemaFactory.createForClass(User);
-
-// Index for fast lookups
-UserSchema.index({ email: 1 });
-UserSchema.index({ role: 1, isActive: 1 });
+export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
+  [UserRole.SUPER_ADMIN]: ['*'],
+  [UserRole.ADMIN]:       ['dashboard','analytics','conversations','documents','training','knowledge','companies','settings','cache','market'],
+  [UserRole.EDITOR]:      ['documents','knowledge','companies'],
+  [UserRole.VIEWER]:      ['dashboard','analytics','conversations'],
+  [UserRole.AGENT]:       ['documents','knowledge','companies'],
+};

@@ -48,27 +48,12 @@ services:
       - ./data/uploads:/app/uploads        # uploaded documents
       - ./data/logs:/app/logs              # application logs
     depends_on:
-      mongodb:
-        condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
         condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-    networks: [msx-net]
-
-  # --- MongoDB (conversations, analytics, knowledge) ---
-  mongodb:
-    image: mongo:7
-    volumes:
-      - ./data/mongodb:/data/db            # ← host folder, survives docker down
-    healthcheck:
-      test: ['CMD', 'mongosh', '--eval', "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     restart: unless-stopped
     networks: [msx-net]
 

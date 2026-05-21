@@ -25,9 +25,30 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
       const client = await this.pool.connect();
       client.release();
       this.logger.log('✅ Connected to Chatboot PostgreSQL');
+      await this.runMigrations();
     } catch (err) {
       this.logger.error(`Failed to connect to Chatboot PG: ${err.message}`);
     }
+  }
+
+  /** Idempotent migrations — add created_by / updated_by to all tables */
+  private async runMigrations() {
+    const tables = [
+      'knowledge_base', 'faqs', 'api_endpoints',
+      'companies', 'unanswered_questions', 'system_settings',
+    ];
+    for (const tbl of tables) {
+      try {
+        await this.query(
+          `ALTER TABLE ${tbl}
+             ADD COLUMN IF NOT EXISTS created_by VARCHAR(255),
+             ADD COLUMN IF NOT EXISTS updated_by  VARCHAR(255)`,
+        );
+      } catch (err) {
+        this.logger.warn(`Migration skip (${tbl}): ${err.message}`);
+      }
+    }
+    this.logger.log('✅ PG migrations complete (created_by / updated_by)');
   }
 
   async onModuleDestroy() {
@@ -118,7 +139,7 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
   }
 
-  async upsertCompany(data: any) {
+  async upsertCompany(data: any, actorEmail?: string) {
     const {
       id,
       symbol,
@@ -130,8 +151,6 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
       sector_id,
       market_id,
       status_id,
-      clone_name,
-      url,
     } = data;
 
     if (id) {
@@ -140,13 +159,12 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
          SET symbol=$1, long_name_ar=$2, long_name_en=$3,
              short_name_ar=$4, short_name_en=$5,
              type=$6, sector_id=$7, market_id=$8, status_id=$9,
-             clone_name=$10, url=$11,
-             updated_at=NOW()
-         WHERE id=$12 RETURNING *`,
+             updated_by=$10, updated_at=NOW()
+         WHERE id=$11 RETURNING *`,
         [symbol, long_name_ar, long_name_en,
          short_name_ar, short_name_en,
          type, sector_id, market_id, status_id,
-         clone_name ?? null, url ?? null,
+         actorEmail ?? null,
          id],
       );
     }
@@ -154,16 +172,16 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     return this.query(
       `INSERT INTO companies
          (id, symbol, long_name_ar, long_name_en, short_name_ar, short_name_en,
-          type, sector_id, market_id, status_id, clone_name, url,
-          created_at, updated_at)
+          type, sector_id, market_id, status_id,
+          created_by, updated_by, created_at, updated_at)
        VALUES
-         (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+         (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10,
           NOW(), NOW())
        RETURNING *`,
       [symbol, long_name_ar, long_name_en,
        short_name_ar, short_name_en,
        type, sector_id, market_id, status_id,
-       clone_name ?? null, url ?? null],
+       actorEmail ?? null],
     );
   }
 
@@ -247,19 +265,20 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
   }
 
-  async upsertFaq(data: any) {
+  async upsertFaq(data: any, actorEmail?: string) {
     const { id, question, answer, category, is_active } = data;
     if (id) {
       return this.query(
-        `UPDATE faqs SET question=$1,answer=$2,category=$3,is_active=$4,updated_at=NOW()
-         WHERE id=$5 RETURNING *`,
-        [question, answer, category, is_active ?? true, id],
+        `UPDATE faqs SET question=$1,answer=$2,category=$3,is_active=$4,
+                         updated_by=$5,updated_at=NOW()
+         WHERE id=$6 RETURNING *`,
+        [question, answer, category, is_active ?? true, actorEmail ?? null, id],
       );
     }
     return this.query(
-      `INSERT INTO faqs (id,question,answer,category,is_active,created_at,updated_at)
-       VALUES (gen_random_uuid(),$1,$2,$3,$4,NOW(),NOW()) RETURNING *`,
-      [question, answer, category, is_active ?? true],
+      `INSERT INTO faqs (id,question,answer,category,is_active,created_by,updated_by,created_at,updated_at)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$5,NOW(),NOW()) RETURNING *`,
+      [question, answer, category, is_active ?? true, actorEmail ?? null],
     );
   }
 
@@ -308,19 +327,20 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     return rows[0] ?? null;
   }
 
-  async upsertKnowledge(data: any) {
+  async upsertKnowledge(data: any, actorEmail?: string) {
     const { id, title, content, category, tags, source } = data;
     if (id) {
       return this.query(
-        `UPDATE knowledge_base SET title=$1,content=$2,category=$3,tags=$4,source=$5,updated_at=NOW()
-         WHERE id=$6 RETURNING id,title,category`,
-        [title, content, category, JSON.stringify(tags ?? []), source, id],
+        `UPDATE knowledge_base SET title=$1,content=$2,category=$3,tags=$4,source=$5,
+                                   updated_by=$6,updated_at=NOW()
+         WHERE id=$7 RETURNING id,title,category`,
+        [title, content, category, JSON.stringify(tags ?? []), source, actorEmail ?? null, id],
       );
     }
     return this.query(
-      `INSERT INTO knowledge_base (id,title,content,category,tags,source,created_at,updated_at)
-       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,NOW(),NOW()) RETURNING id,title,category`,
-      [title, content, category, JSON.stringify(tags ?? []), source],
+      `INSERT INTO knowledge_base (id,title,content,category,tags,source,created_by,updated_by,created_at,updated_at)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$6,NOW(),NOW()) RETURNING id,title,category`,
+      [title, content, category, JSON.stringify(tags ?? []), source, actorEmail ?? null],
     );
   }
 
@@ -444,7 +464,7 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
   }
 
-  async upsertApiEndpoint(data: any) {
+  async upsertApiEndpoint(data: any, actorEmail?: string) {
     const {
       id, name, description, url, method, body, headers,
       keywords_en, keywords_ar, category, is_active,
@@ -453,22 +473,24 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
       return this.query(
         `UPDATE api_endpoints
          SET name=$1,description=$2,url=$3,method=$4,body=$5,headers=$6,
-             keywords_en=$7,keywords_ar=$8,category=$9,is_active=$10,updated_at=NOW()
-         WHERE id=$11 RETURNING *`,
+             keywords_en=$7,keywords_ar=$8,category=$9,is_active=$10,
+             updated_by=$11,updated_at=NOW()
+         WHERE id=$12 RETURNING *`,
         [name, description, url, method,
          JSON.stringify(body ?? {}), JSON.stringify(headers ?? {}),
          JSON.stringify(keywords_en ?? []), JSON.stringify(keywords_ar ?? []),
-         category, is_active ?? true, id],
+         category, is_active ?? true, actorEmail ?? null, id],
       );
     }
     return this.query(
       `INSERT INTO api_endpoints
-       (id,name,description,url,method,body,headers,keywords_en,keywords_ar,category,is_active,created_at,updated_at)
-       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW()) RETURNING *`,
+       (id,name,description,url,method,body,headers,keywords_en,keywords_ar,
+        category,is_active,created_by,updated_by,created_at,updated_at)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,NOW(),NOW()) RETURNING *`,
       [name, description, url, method,
        JSON.stringify(body ?? {}), JSON.stringify(headers ?? {}),
        JSON.stringify(keywords_en ?? []), JSON.stringify(keywords_ar ?? []),
-       category, is_active ?? true],
+       category, is_active ?? true, actorEmail ?? null],
     );
   }
 

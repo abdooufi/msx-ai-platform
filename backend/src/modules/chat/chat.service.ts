@@ -1,22 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
 import { Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { RagService } from '../rag/rag.service';
 import { LlmService, LlmMessage } from '../rag/llm.service';
 import { DynamicApiService } from '../admin/dynamic-api.service';
-import {
-  Conversation,
-  ConversationDocument,
-  MessageRole,
-  MessageStatus,
-} from '../../schemas/conversation.schema';
-import {
-  AnalyticsEvent,
-  AnalyticsEventDocument,
-  EventType,
-} from '../../schemas/analytics.schema';
+import { AppPgService } from '../database/app-pg.service';
 import { ChatRequestDto } from './chat.dto';
 
 @Injectable()
@@ -24,10 +12,7 @@ export class ChatService {
   private readonly logger = new Logger(ChatService.name);
 
   constructor(
-    @InjectModel(Conversation.name)
-    private conversationModel: Model<ConversationDocument>,
-    @InjectModel(AnalyticsEvent.name)
-    private analyticsModel: Model<AnalyticsEventDocument>,
+    private pg: AppPgService,
     private rag: RagService,
     private llm: LlmService,
     private dynamicApi: DynamicApiService,
@@ -268,7 +253,7 @@ export class ChatService {
 
     // 8. Analytics
     await this.trackEvent({
-      type: EventType.MESSAGE_SENT,
+      type: 'message_sent',
       sessionId,
       language,
       channel: dto.channel || 'web',
@@ -292,22 +277,22 @@ export class ChatService {
   ) {
     try {
       const userMsg = {
-        _id: new Types.ObjectId(),
-        role: MessageRole.USER,
+        _id: uuidv4(),
+        role: 'user',
         content: dto.message,
         language: result.language,
-        status: MessageStatus.SUCCESS,
+        status: 'success',
         sources: [],
         createdAt: new Date(),
         feedback: null,
       };
 
       const assistantMsg = {
-        _id: new Types.ObjectId(),
-        role: MessageRole.ASSISTANT,
+        _id: uuidv4(),
+        role: 'assistant',
         content: result.response,
         language: result.language,
-        status: MessageStatus.SUCCESS,
+        status: 'success',
         sources: result.sources.slice(0, 5),
         tokensUsed: result.tokensUsed,
         latencyMs: result.latencyMs,
@@ -316,26 +301,23 @@ export class ChatService {
         feedback: null,
       };
 
-      await this.conversationModel.findOneAndUpdate(
-        { sessionId },
-        {
-          $push: { messages: { $each: [userMsg, assistantMsg] } },
-          $setOnInsert: {
-            sessionId,
-            language: result.language,
-            channel: dto.channel || 'web',
-          },
-        },
-        { upsert: true, new: true },
+      await this.pg.upsertConversation(
+        sessionId,
+        [userMsg, assistantMsg],
+        { language: result.language, channel: dto.channel || 'web' },
       );
     } catch (err) {
       this.logger.error(`Failed to persist conversation: ${err.message}`);
     }
   }
 
-  private async trackEvent(data: Partial<AnalyticsEvent>) {
+  private async trackEvent(data: {
+    type: string; sessionId?: string; language?: string; channel?: string;
+    latencyMs?: number; tokensUsed?: number; confidenceScore?: number;
+    hadContext?: boolean; errorType?: string; metadata?: any;
+  }) {
     try {
-      await this.analyticsModel.create(data);
+      await this.pg.trackEvent(data);
     } catch { /* analytics should never crash the chat */ }
   }
 
@@ -345,23 +327,11 @@ export class ChatService {
     feedback: 'positive' | 'negative',
     note?: string,
   ) {
-    await this.conversationModel.updateOne(
-      { sessionId, 'messages._id': new Types.ObjectId(messageId) },
-      {
-        $set: {
-          'messages.$.feedback': feedback,
-          'messages.$.feedbackNote': note,
-        },
-      },
-    );
-    return { ok: true };
+    return this.pg.updateMessageFeedback(sessionId, messageId, feedback, note);
   }
 
   async getConversation(sessionId: string) {
-    return this.conversationModel
-      .findOne({ sessionId })
-      .select('-messages.sources') // lighter response for client
-      .lean();
+    return this.pg.getConversationBySession(sessionId);
   }
 
   /** True when the user's message is a chart/graph request */

@@ -197,6 +197,35 @@ export const deletePgUnanswered = (id: string) =>
 export const getCacheStats = () => api.get('/admin/cache/stats')
 export const getModels     = () => api.get('/admin/models')
 
+// ─── User Management ──────────────────────────────────────────────
+export const listUsers      = (page = 1, limit = 20) =>
+  api.get(`/auth/users?page=${page}&limit=${limit}`)
+export const getUser        = (id: string) => api.get(`/auth/users/${id}`)
+export const createUser     = (body: { email: string; password: string; name: string; role: string }) =>
+  api.post('/auth/users', body)
+export const updateUser     = (id: string, body: { name?: string; role?: string; isActive?: boolean }) =>
+  api.put(`/auth/users/${id}`, body)
+export const changeUserPassword = (id: string, password: string) =>
+  api.patch(`/auth/users/${id}/password`, { password })
+export const deleteUser     = (id: string) => api.delete(`/auth/users/${id}`)
+
+// ─── Audit Logs ───────────────────────────────────────────────────
+export const getAuditLogs  = (params: {
+  page?: number; limit?: number; action?: string;
+  resource?: string; email?: string; from?: string; to?: string;
+} = {}) => {
+  const p = new URLSearchParams()
+  if (params.page)     p.set('page',     String(params.page))
+  if (params.limit)    p.set('limit',    String(params.limit))
+  if (params.action)   p.set('action',   params.action)
+  if (params.resource) p.set('resource', params.resource)
+  if (params.email)    p.set('email',    params.email)
+  if (params.from)     p.set('from',     params.from)
+  if (params.to)       p.set('to',       params.to)
+  return api.get(`/audit?${p}`)
+}
+export const getAuditStats = () => api.get('/audit/stats')
+
 // ─── Company Live Data ────────────────────────────────────────────
 export const getCompanySnapshot  = (symbol: string) => api.get(`/admin/companies/snapshot/${symbol}`)
 export const getCompanyNews      = (symbol: string) => api.get(`/admin/companies/news/${symbol}`)
