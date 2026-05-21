@@ -11,8 +11,12 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
+  const isDev = process.env.NODE_ENV !== 'production';
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    logger: ['error', 'warn', 'log', 'debug'],
+    // In production: hide DEBUG noise. In dev: show everything.
+    logger: isDev
+      ? ['error', 'warn', 'log', 'debug', 'verbose']
+      : ['error', 'warn', 'log'],
   });
 
   // ─── Security ──────────────────────────────────────────────────

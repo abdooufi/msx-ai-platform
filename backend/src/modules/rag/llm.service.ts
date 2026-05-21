@@ -472,6 +472,7 @@ ${liveSection}${ragSection}
 قواعد إضافية:
 - إذا توفرت بيانات مباشرة، استخدمها كمصدر رئيسي وأجب بالأرقام الفعلية
 - لا تخترع أرقاماً أو أسعاراً
+- إذا وردت سجلات تداول بتوقيتات (جدول الوقت | السعر | الحجم)، اعرضها كملخص واضح: الافتتاح والأعلى والأدنى وآخر سعر وإجمالي الحجم، ثم صفوف التداول مرتبةً بالوقت — ولا تقل إنك لا تستطيع عرض رسم بياني
 - أجب بالعربية للأسئلة العربية
 - كن مختصراً ومهنياً`;
     }
@@ -502,7 +503,8 @@ This rule applies to ANY off-topic question including: travel, tourism, food, he
 ━━━ ADDITIONAL RULES ━━━
 - If LIVE MARKET DATA is provided, prioritize it and quote exact numbers
 - Never fabricate prices, percentages, or company data
-- If MSX data is not available for a valid MSX question, say: "I don't have that data right now. Please visit www.msx.om for the latest information."
+- When intraday trade records are provided (Time | Price | Volume table), present them as a clear summary: open, high, low, last price, total volume, then the time-ordered trade rows — do NOT say you cannot show a chart
+- If no live data at all is available for a valid MSX question, say: "I don't have that data right now. Please visit www.msx.om for the latest information."
 - Be professional, concise, and helpful
 - Respond in Arabic for Arabic questions`;
   }

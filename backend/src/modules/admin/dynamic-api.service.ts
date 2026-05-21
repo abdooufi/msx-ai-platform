@@ -616,8 +616,11 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
         if (!data) return null;
 
         const isSnapshot = ep.category === 'company' || ep.name.toLowerCase().includes('snapshot');
+        const isChart    = ep.category === 'chart'   || ep.name.toLowerCase().includes('chart');
         const formatted = isSnapshot
           ? this.formatSnapshotForAi(symbol, data)
+          : isChart
+          ? this.formatChartDataForAi(symbol, data)
           : this.flattenAny(data).join('\n');
 
         return formatted ? `🔹 ${ep.name}:\n${formatted}` : null;
@@ -695,6 +698,64 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
       if (!PRIORITY_FIELDS.includes(label)) {
         lines.push(`  ${label}: ${value}`);
       }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format intraday chart trade records into a clean time-ordered table for the LLM.
+   * MSX chart-data.aspx returns: [{ Year, Month, Day, Hour, Minute, LTP, Volume, Value, Turnover }]
+   */
+  formatChartDataForAi(symbol: string, data: any): string {
+    const arr: any[] = Array.isArray(data) ? data
+      : Array.isArray(data?.d) ? data.d
+      : [];
+
+    if (!arr.length) return '';
+
+    // Build rows with a numeric sort key
+    const rows = arr
+      .map(r => {
+        const h   = Number(r.Hour   ?? 0);
+        const min = Number(r.Minute ?? 0);
+        const ltp = parseFloat(r.LTP    ?? 0);
+        const vol = parseInt(r.Volume  ?? 0, 10);
+        const val = parseFloat(r.Value ?? r.Turnover ?? 0);
+        const sortKey = h * 100 + min;
+        const time = `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
+        return { time, ltp, vol, val, sortKey };
+      })
+      .filter(r => r.ltp > 0)
+      .sort((a, b) => a.sortKey - b.sortKey);
+
+    if (!rows.length) return '';
+
+    const first = rows[0];
+    const last  = rows[rows.length - 1];
+    const high  = rows.reduce((m, r) => Math.max(m, r.ltp), 0);
+    const low   = rows.reduce((m, r) => Math.min(m, r.ltp), Infinity);
+    const totalVol = rows.reduce((s, r) => s + r.vol, 0);
+
+    const lines: string[] = [
+      `📈 Intraday Trade Records: ${symbol.toUpperCase()} (${rows.length} trades today)`,
+      `  Open: ${first.ltp.toFixed(3)}  |  High: ${high.toFixed(3)}  |  Low: ${low.toFixed(3)}  |  Last: ${last.ltp.toFixed(3)}`,
+      `  Total Volume: ${totalVol.toLocaleString()}`,
+      '',
+      'Time  | Price  | Volume    | Value',
+      '------+--------+-----------+-----------',
+    ];
+
+    // Show last 20 trades (most recent) so we don't overflow context
+    const display = rows.slice(-20);
+    for (const r of display) {
+      lines.push(
+        `${r.time}  | ${r.ltp.toFixed(3)} | ${String(r.vol.toLocaleString()).padStart(9)} | ${r.val.toFixed(0)}`,
+      );
+    }
+
+    if (rows.length > 20) {
+      lines.push(`... (${rows.length - 20} earlier trades not shown)`);
     }
 
     return lines.join('\n');
