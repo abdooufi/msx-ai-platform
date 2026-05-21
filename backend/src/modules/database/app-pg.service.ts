@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { Pool, PoolClient } from 'pg';
 import * as bcrypt from 'bcryptjs';
+import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class AppPgService implements OnModuleInit, OnModuleDestroy {
@@ -159,6 +160,10 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
     await this.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_agent TEXT`);
     await this.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ip_address VARCHAR(100)`);
     await this.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
+    // ensure id column has a default (pre-existing table may lack one)
+    try {
+      await this.query(`ALTER TABLE conversations ALTER COLUMN id SET DEFAULT gen_random_uuid()`);
+    } catch { /* already has a default or extension unavailable — harmless */ }
     // ensure session_id index
     await this.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id)`);
     // ensure app_users admin
@@ -429,19 +434,19 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
     language?: string; channel?: string;
   } = {}) {
     await this.query(
-      `INSERT INTO conversations (session_id, messages, language, channel, created_at, updated_at)
-       VALUES ($1, $2::jsonb, $3, $4, NOW(), NOW())
+      `INSERT INTO conversations (id, session_id, messages, language, channel, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, $5, NOW(), NOW())
        ON CONFLICT (session_id) DO UPDATE
          SET messages   = (
                SELECT jsonb_agg(msg)
                FROM (
                  SELECT jsonb_array_elements(conversations.messages::jsonb) AS msg
                  UNION ALL
-                 SELECT jsonb_array_elements($2::jsonb) AS msg
+                 SELECT jsonb_array_elements($3::jsonb) AS msg
                ) sub
              ),
              updated_at = NOW()`,
-      [sessionId, JSON.stringify(messages), meta.language ?? 'en', meta.channel ?? 'web'],
+      [uuidv4(), sessionId, JSON.stringify(messages), meta.language ?? 'en', meta.channel ?? 'web'],
     );
   }
 
