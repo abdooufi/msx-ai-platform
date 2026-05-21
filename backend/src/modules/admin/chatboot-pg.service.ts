@@ -66,17 +66,29 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Companies ────────────────────────────────────────────────────────────
 
-  async getCompanies(page = 1, limit = 20, search?: string) {
+  /**
+   * List companies with optional search + optional equity-only filter.
+   *
+   * @param onlyEquities  When true, restricts to type='C' AND is_visible=1
+   *                      (used by the public chat search endpoint).
+   *                      Default false (admin panel sees everything).
+   */
+  async getCompanies(page = 1, limit = 20, search?: string, onlyEquities = false) {
     const offset = (page - 1) * limit;
 
+    // Build the base filter clause (equity guard, always first so param indices stay stable)
+    const baseFilter = onlyEquities ? `type = 'C' AND is_visible = 1` : null;
+
     if (search) {
-      // When search is present: $1 = search pattern (shared by WHERE and COUNT),
-      // $2 = limit, $3 = offset (main query only).
-      const like  = `%${search}%`;
-      const where = `WHERE (symbol       ILIKE $1
+      const like        = `%${search}%`;
+      const params: any[] = [like];
+
+      // $1 = search pattern
+      const searchCond  = `(symbol       ILIKE $1
                          OR long_name_en  ILIKE $1
                          OR short_name_en ILIKE $1
-                         OR clone_name    ILIKE $1)`;
+                         OR short_name_ar ILIKE $1)`;
+      const where       = `WHERE ${baseFilter ? `${baseFilter} AND ` : ''}${searchCond}`;
 
       const [rows, countRow] = await Promise.all([
         this.query(
@@ -85,20 +97,21 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
         ),
         this.query<{ count: string }>(
           `SELECT COUNT(*)::text AS count FROM companies ${where}`,
-          [like],
+          params,
         ),
       ]);
       return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
     }
 
-    // No search — simpler query, no parameter numbering issue
+    // No search term
+    const where = baseFilter ? `WHERE ${baseFilter}` : '';
     const [rows, countRow] = await Promise.all([
       this.query(
-        `SELECT * FROM companies ORDER BY symbol LIMIT $1 OFFSET $2`,
+        `SELECT * FROM companies ${where} ORDER BY symbol LIMIT $1 OFFSET $2`,
         [limit, offset],
       ),
       this.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM companies`,
+        `SELECT COUNT(*)::text AS count FROM companies ${where}`,
         [],
       ),
     ]);
@@ -188,12 +201,13 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     for (const word of words) {
       const rows = await this.query<{ symbol: string }>(
         `SELECT symbol FROM companies
-         WHERE clone_name    ILIKE $1
-            OR long_name_en  ILIKE $1
-            OR short_name_en ILIKE $1
-            OR long_name_ar  ILIKE $1
-            OR short_name_ar ILIKE $1
-            OR symbol        ILIKE $1
+         WHERE type = 'C' AND is_visible = 1
+           AND (long_name_en  ILIKE $1
+             OR short_name_en ILIKE $1
+             OR long_name_ar  ILIKE $1
+             OR short_name_ar ILIKE $1
+             OR symbol        ILIKE $1)
+         ORDER BY symbol
          LIMIT 1`,
         [`%${word}%`],
       );

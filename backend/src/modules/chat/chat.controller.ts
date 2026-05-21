@@ -79,7 +79,9 @@ export class ChatController {
   @ApiOperation({ summary: 'Search company symbols for chat / autocomplete (public)' })
   @ApiQuery({ name: 'q', required: false, description: 'Symbol / name filter' })
   async getCompanySymbols(@Query('q') q?: string) {
-    const result = await this.pg.getCompanies(1, 40, q || undefined);
+    // onlyEquities=true → type='C' AND is_visible=1 only
+    // Limit 200 covers all ~199 visible equities; search narrows it further
+    const result = await this.pg.getCompanies(1, 200, q || undefined, true);
     return (result.data as any[]).map(c => ({
       symbol:  c.symbol,
       nameEn:  c.long_name_en  ?? c.short_name_en ?? c.symbol,
