@@ -705,7 +705,15 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Format intraday chart trade records into a clean time-ordered table for the LLM.
-   * MSX chart-data.aspx returns: [{ Year, Month, Day, Hour, Minute, LTP, Volume, Value, Turnover }]
+   *
+   * MSX company-chart-data.aspx returns:
+   *   { Date: null, Year, Month, Day, Hour, Minute, LTP, Value, Volume, Turnover }
+   *
+   * Notes on the real API fields:
+   *   - Value   = shares traded in this tick (same as Volume in most responses)
+   *   - Volume  = shares traded in this tick
+   *   - Turnover = monetary value in OMR (often 0 — compute as LTP × Volume when missing)
+   *   - Sort is by Hour + Minute; the LAST row is the most recent trade
    */
   formatChartDataForAi(symbol: string, data: any): string {
     const arr: any[] = Array.isArray(data) ? data
@@ -714,48 +722,55 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
 
     if (!arr.length) return '';
 
-    // Build rows with a numeric sort key
+    // Build rows sorted by time
     const rows = arr
       .map(r => {
-        const h   = Number(r.Hour   ?? 0);
-        const min = Number(r.Minute ?? 0);
-        const ltp = parseFloat(r.LTP    ?? 0);
-        const vol = parseInt(r.Volume  ?? 0, 10);
-        const val = parseFloat(r.Value ?? r.Turnover ?? 0);
-        const sortKey = h * 100 + min;
-        const time = `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
-        return { time, ltp, vol, val, sortKey };
+        const h        = Number(r.Hour   ?? 0);
+        const min      = Number(r.Minute ?? 0);
+        const ltp      = parseFloat(r.LTP    ?? 0);
+        const shares   = parseInt(r.Volume  ?? r.Value ?? 0, 10);
+        // Turnover is often 0 — fall back to LTP × shares
+        const turnover = parseFloat(r.Turnover) > 0
+          ? parseFloat(r.Turnover)
+          : parseFloat((ltp * shares).toFixed(3));
+        const sortKey  = h * 60 + min;
+        const time     = `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
+        return { time, ltp, shares, turnover, sortKey };
       })
       .filter(r => r.ltp > 0)
       .sort((a, b) => a.sortKey - b.sortKey);
 
     if (!rows.length) return '';
 
-    const first = rows[0];
-    const last  = rows[rows.length - 1];
-    const high  = rows.reduce((m, r) => Math.max(m, r.ltp), 0);
-    const low   = rows.reduce((m, r) => Math.min(m, r.ltp), Infinity);
-    const totalVol = rows.reduce((s, r) => s + r.vol, 0);
+    const first     = rows[0];
+    const last      = rows[rows.length - 1];   // ← most recent trade
+    const high      = rows.reduce((m, r) => Math.max(m, r.ltp), 0);
+    const low       = rows.reduce((m, r) => Math.min(m, r.ltp), Infinity);
+    const totalShares   = rows.reduce((s, r) => s + r.shares, 0);
+    const totalTurnover = rows.reduce((s, r) => s + r.turnover, 0);
 
     const lines: string[] = [
-      `📈 Intraday Trade Records: ${symbol.toUpperCase()} (${rows.length} trades today)`,
-      `  Open: ${first.ltp.toFixed(3)}  |  High: ${high.toFixed(3)}  |  Low: ${low.toFixed(3)}  |  Last: ${last.ltp.toFixed(3)}`,
-      `  Total Volume: ${totalVol.toLocaleString()}`,
-      '',
-      'Time  | Price  | Volume    | Value',
-      '------+--------+-----------+-----------',
+      `📈 Intraday Chart — ${symbol.toUpperCase()} (${rows.length} trades today)`,
+      ``,
+      `  🕐 Latest Trade : ${last.time}  →  LTP: ${last.ltp.toFixed(3)} OMR`,
+      `  Open  : ${first.ltp.toFixed(3)}  |  High: ${high.toFixed(3)}  |  Low: ${low.toFixed(3)}  |  Last: ${last.ltp.toFixed(3)}`,
+      `  Total Volume : ${totalShares.toLocaleString()} shares`,
+      `  Total Turnover: ${totalTurnover.toFixed(3)} OMR`,
+      ``,
+      `Time  | LTP (OMR) | Shares    | Turnover (OMR)`,
+      `------+-----------+-----------+---------------`,
     ];
 
-    // Show last 20 trades (most recent) so we don't overflow context
+    // Show only the last 20 trades (most recent) to stay within LLM context
     const display = rows.slice(-20);
     for (const r of display) {
       lines.push(
-        `${r.time}  | ${r.ltp.toFixed(3)} | ${String(r.vol.toLocaleString()).padStart(9)} | ${r.val.toFixed(0)}`,
+        `${r.time}  | ${r.ltp.toFixed(3).padStart(9)} | ${String(r.shares.toLocaleString()).padStart(9)} | ${r.turnover.toFixed(3)}`,
       );
     }
 
     if (rows.length > 20) {
-      lines.push(`... (${rows.length - 20} earlier trades not shown)`);
+      lines.push(`... (${rows.length - 20} earlier trades not shown, first trade at ${first.time})`);
     }
 
     return lines.join('\n');

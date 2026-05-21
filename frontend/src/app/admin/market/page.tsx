@@ -80,28 +80,22 @@ function normalizeChartData(raw: any): TradePoint[] {
 
   return arr
     .map((row: any, i: number) => {
-      const price = num(
-        row.LTP ?? row.ltp ?? row.Price ?? row.price ?? row.ClosePrice ?? 0
-      )
-      const volume = num(
-        row.Volume ?? row.volume ?? row.Vol ?? row.vol ?? 0
-      )
+      const price  = num(row.LTP ?? row.ltp ?? row.Price ?? row.price ?? 0)
+      // MSX: Volume = shares per tick; Value = same; Turnover often 0
+      const shares = num(row.Volume ?? row.Value ?? row.volume ?? 0)
 
-      // MSX chart-data uses Year/Month/Day/Hour/Minute numeric fields
-      let time: string
-      if (row.Hour !== undefined || row.Minute !== undefined) {
-        const h = String(row.Hour  ?? 0).padStart(2, '0')
-        const m = String(row.Minute ?? 0).padStart(2, '0')
-        time = `${h}:${m}`
-      } else {
-        // fallback: strip date portion if it's an ISO string
-        time = String(row.Time ?? row.TradeTime ?? row.DateTime ?? row.Date ?? i)
-          .replace(/^.*T/, '').replace(/\.\d+.*$/, '')
-      }
+      // Build time from Hour + Minute (real MSX field names)
+      const h = String(row.Hour   ?? 0).padStart(2, '0')
+      const m = String(row.Minute ?? 0).padStart(2, '0')
+      const time = (row.Hour !== undefined || row.Minute !== undefined)
+        ? `${h}:${m}`
+        : String(row.Time ?? row.TradeTime ?? row.DateTime ?? i)
+            .replace(/^.*T/, '').replace(/\.\d+.*$/, '')
 
-      return { time, price, volume, raw: i }
+      return { time, price, volume: shares, raw: i }
     })
     .filter(p => p.price > 0)
+    .sort((a, b) => a.raw - b.raw)   // preserve original order (already time-sorted by MSX)
 }
 
 /** Extract a readable value from the snapshot (backend may or may not apply FIELD_MAP) */
@@ -334,6 +328,24 @@ export default function MarketPage() {
             <span className="text-xs text-gray-500">{chartData.length} trades</span>
           )}
         </div>
+
+        {/* Latest trade badge */}
+        {chartData.length > 0 && (() => {
+          const last = chartData[chartData.length - 1]
+          return (
+            <div className="flex items-center gap-3 mb-3 bg-gray-800/50 rounded-lg px-3 py-2">
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-xs text-gray-400">Latest trade</span>
+              <span className="text-xs font-mono font-bold text-white">{last.time}</span>
+              <span className={`text-xs font-mono font-bold ${isUp ? 'text-green-400' : 'text-red-400'}`}>
+                {last.price.toFixed(3)} OMR
+              </span>
+              <span className="text-xs text-gray-500">
+                {fmtVol(last.volume)} shares
+              </span>
+            </div>
+          )
+        })()}
 
         {loadingChart ? (
           <div className="h-64 flex items-center justify-center text-gray-500 gap-2">
