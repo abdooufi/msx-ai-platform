@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import {
   Database, RefreshCcw, Trash2, Play, CheckCircle2,
   AlertCircle, Loader2, ChevronLeft, ChevronRight,
@@ -73,33 +73,39 @@ function StatusBadge({ status }: { status: TableIndexStatus['status'] }) {
 
 function IndexPanel() {
   const [statuses, setStatuses] = useState<TableIndexStatus[]>([])
-  const [polling, setPolling] = useState(false)
   const [triggering, setTriggering] = useState<string | null>(null)
+  // Use a ref so the interval callback always sees the latest statuses
+  // without adding statuses to the deps array (which would create a new
+  // interval on every status update → dozens of requests/second).
+  const statusesRef = React.useRef<TableIndexStatus[]>([])
 
   const load = useCallback(async () => {
     try {
       const { data } = await getIndexStatus()
       setStatuses(data)
+      statusesRef.current = data
     } catch { /* silent */ }
   }, [])
 
-  // Auto-poll while any table is indexing
+  // Stable interval: created once, uses ref for latest statuses
   useEffect(() => {
     load()
     const id = setInterval(() => {
-      if (statuses.some(s => s.status === 'indexing')) load()
-    }, 2000)
+      // Always refresh when any table is indexing; otherwise poll every 5 s
+      load()
+    }, 3000)
     return () => clearInterval(id)
-  }, [load, statuses])
+  }, [load]) // ← no `statuses` in deps — interval is stable
 
   const handleIndexAll = async () => {
     setTriggering('all')
     try {
       await indexAllTables()
       toast.success('Full re-index started')
-      setTimeout(load, 500)
-    } catch {
-      toast.error('Failed to start indexing')
+      setTimeout(load, 600)
+    } catch (e: any) {
+      const msg = e?.response?.data?.message ?? e?.message ?? 'Request failed'
+      toast.error(`Failed to start indexing: ${msg}`)
     } finally {
       setTriggering(null)
     }
@@ -110,9 +116,10 @@ function IndexPanel() {
     try {
       await indexTable(table)
       toast.success(`Indexing started: ${TABLE_META[table].label}`)
-      setTimeout(load, 500)
-    } catch {
-      toast.error('Failed to start indexing')
+      setTimeout(load, 600)
+    } catch (e: any) {
+      const msg = e?.response?.data?.message ?? e?.message ?? 'Request failed'
+      toast.error(`Failed to start indexing: ${msg}`)
     } finally {
       setTriggering(null)
     }
@@ -124,8 +131,9 @@ function IndexPanel() {
       await clearTableIndex(table)
       toast.success(`Cleared: ${TABLE_META[table].label}`)
       load()
-    } catch {
-      toast.error('Failed to clear index')
+    } catch (e: any) {
+      const msg = e?.response?.data?.message ?? e?.message ?? 'Failed'
+      toast.error(`Failed to clear index: ${msg}`)
     }
   }
 

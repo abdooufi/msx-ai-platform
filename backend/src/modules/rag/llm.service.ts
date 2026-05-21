@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
+import axios from 'axios';
 import { Response } from 'express';
 
-export type AiProvider = 'ollama' | 'deepseek';
+/** All supported providers + 'auto' smart-routing mode */
+export type AiProvider = 'ollama' | 'deepseek' | 'claude' | 'auto';
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant';
@@ -20,15 +22,23 @@ export interface LlmResult {
   content: string;
   tokensUsed: number;
   latencyMs: number;
+  provider?: string;
 }
 
 export interface ProviderInfo {
   provider: AiProvider;
   model: string;
+  // Ollama
   ollamaUrl: string;
   ollamaModel: string;
+  // DeepSeek
   deepseekModel: string;
   deepseekConfigured: boolean;
+  // Claude
+  claudeModel: string;
+  claudeConfigured: boolean;
+  // Auto
+  autoLastPicked?: string;
 }
 
 @Injectable()
@@ -43,10 +53,18 @@ export class LlmService {
   private readonly deepseekModel: string;
   private readonly ollamaUrl: string;
 
+  // Claude
+  private readonly claudeModel: string;
+  private readonly claudeApiKey: string;
+  private readonly claudeBaseUrl: string;
+  readonly claudeConfigured: boolean;
+
   private readonly defaultTemp: number;
   private readonly defaultMaxTokens: number;
 
   private currentProvider: AiProvider;
+  /** Tracks which real provider was last chosen by 'auto' mode */
+  private autoLastPicked: string = '';
 
   constructor(private config: ConfigService) {
     this.ollamaUrl   = config.get<string>('OLLAMA_URL', 'http://localhost:11434');
@@ -56,12 +74,26 @@ export class LlmService {
     const deepseekKey  = config.get<string>('DEEPSEEK_API_KEY', '');
     const deepseekBase = config.get<string>('DEEPSEEK_BASE_URL', 'https://api.deepseek.com');
 
+    // Claude
+    this.claudeModel   = config.get<string>('CLAUDE_MODEL', 'claude-3-5-haiku-20241022');
+    this.claudeApiKey  = config.get<string>('CLAUDE_API_KEY', '');
+    this.claudeBaseUrl = config.get<string>('CLAUDE_BASE_URL', 'https://api.anthropic.com');
+    this.claudeConfigured = !!this.claudeApiKey;
+
     this.defaultTemp      = parseFloat(config.get('LLM_TEMPERATURE', '0.3'));
     this.defaultMaxTokens = parseInt(config.get('LLM_MAX_TOKENS', '2048'), 10);
 
     // Current provider: read from env, default to ollama
     const envProvider = config.get<string>('AI_PROVIDER', 'ollama') as AiProvider;
-    this.currentProvider = envProvider === 'deepseek' && deepseekKey ? 'deepseek' : 'ollama';
+    if (envProvider === 'deepseek' && deepseekKey) {
+      this.currentProvider = 'deepseek';
+    } else if (envProvider === 'claude' && this.claudeConfigured) {
+      this.currentProvider = 'claude';
+    } else if (envProvider === 'auto') {
+      this.currentProvider = 'auto';
+    } else {
+      this.currentProvider = 'ollama';
+    }
 
     // Ollama — OpenAI-compatible API at /v1
     this.ollamaClient = new OpenAI({
@@ -78,7 +110,8 @@ export class LlmService {
     this.logger.log(
       `🤖 AI provider: ${this.currentProvider.toUpperCase()} ` +
       `(model: ${this.activeModel})` +
-      (deepseekKey ? ' | DeepSeek key: configured' : ' | DeepSeek key: not set'),
+      (deepseekKey ? ' | DeepSeek: ✓' : ' | DeepSeek: ✗') +
+      (this.claudeConfigured ? ' | Claude: ✓' : ' | Claude: ✗'),
     );
   }
 
@@ -92,12 +125,18 @@ export class LlmService {
       ollamaModel:        this.ollamaModel,
       deepseekModel:      this.deepseekModel,
       deepseekConfigured: this.config.get<string>('DEEPSEEK_API_KEY', '') !== '',
+      claudeModel:        this.claudeModel,
+      claudeConfigured:   this.claudeConfigured,
+      autoLastPicked:     this.autoLastPicked || undefined,
     };
   }
 
   setProvider(provider: AiProvider): ProviderInfo {
     if (provider === 'deepseek' && !this.config.get<string>('DEEPSEEK_API_KEY', '')) {
       throw new Error('DEEPSEEK_API_KEY is not configured in the environment');
+    }
+    if (provider === 'claude' && !this.claudeConfigured) {
+      throw new Error('CLAUDE_API_KEY is not configured in the environment');
     }
     this.currentProvider = provider;
     this.logger.log(`🔄 Switched AI provider → ${provider.toUpperCase()} (model: ${this.activeModel})`);
@@ -109,17 +148,206 @@ export class LlmService {
   }
 
   private get activeModel(): string {
-    return this.currentProvider === 'deepseek' ? this.deepseekModel : this.ollamaModel;
+    if (this.currentProvider === 'deepseek') return this.deepseekModel;
+    if (this.currentProvider === 'claude')   return this.claudeModel;
+    if (this.currentProvider === 'auto')     return `auto → ${this.autoLastPicked || 'pending'}`;
+    return this.ollamaModel;
+  }
+
+  // ─── Auto-routing ─────────────────────────────────────────────────────────
+
+  /**
+   * Smart provider selection between Ollama and DeepSeek only.
+   * Claude is a manual choice — Auto never routes to it automatically.
+   *
+   * Rules (in priority order):
+   *  1. Live data present + short price query → Ollama (fast, data already injected)
+   *  2. Short / simple query (≤5 words)       → Ollama (fast local)
+   *  3. DeepSeek configured                   → DeepSeek (stronger for longer questions)
+   *  4. Fallback                              → Ollama
+   */
+  pickAutoProvider(message: string, hasLiveData = false): Exclude<AiProvider, 'auto'> {
+    const m = message.toLowerCase().trim();
+
+    // 1. Live data + short price query → keep it local and fast
+    if (hasLiveData && m.split(/\s+/).length <= 8) {
+      return 'ollama';
+    }
+
+    // 2. Short / simple query → Ollama (fast local)
+    if (m.split(/\s+/).length <= 5) {
+      return 'ollama';
+    }
+
+    // 3. DeepSeek available → use it for longer / more complex questions
+    if (this.config.get<string>('DEEPSEEK_API_KEY', '')) {
+      return 'deepseek';
+    }
+
+    // 4. Fallback
+    return 'ollama';
+  }
+
+  // ─── Claude API calls ─────────────────────────────────────────────────────
+
+  private async completeWithClaude(
+    messages: LlmMessage[],
+    opts: LlmOptions = {},
+  ): Promise<LlmResult> {
+    const start = Date.now();
+
+    // Split system message from conversation messages
+    const systemMsg = messages.find(m => m.role === 'system');
+    const convMsgs  = messages.filter(m => m.role !== 'system');
+
+    const body: Record<string, any> = {
+      model:      this.claudeModel,
+      max_tokens: opts.maxTokens ?? this.defaultMaxTokens,
+      messages:   convMsgs.map(m => ({ role: m.role, content: m.content })),
+    };
+    if (systemMsg) body.system = systemMsg.content;
+
+    try {
+      const resp = await axios.post(
+        `${this.claudeBaseUrl}/v1/messages`,
+        body,
+        {
+          headers: {
+            'x-api-key':         this.claudeApiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type':      'application/json',
+          },
+          timeout: 60_000,
+        },
+      );
+
+      const content    = resp.data?.content?.[0]?.text || '';
+      const tokensUsed = (resp.data?.usage?.input_tokens ?? 0) +
+                         (resp.data?.usage?.output_tokens ?? 0);
+      return { content, tokensUsed, latencyMs: Date.now() - start, provider: 'claude' };
+    } catch (err) {
+      const msg = err?.response?.data?.error?.message || err.message;
+      this.logger.error(`Claude completion failed: ${msg}`);
+      throw new Error(msg);
+    }
+  }
+
+  private async streamWithClaude(
+    messages: LlmMessage[],
+    res: Response,
+    opts: LlmOptions = {},
+  ): Promise<{ tokensUsed: number; latencyMs: number }> {
+    const start = Date.now();
+    let tokensUsed = 0;
+
+    const systemMsg = messages.find(m => m.role === 'system');
+    const convMsgs  = messages.filter(m => m.role !== 'system');
+
+    const body: Record<string, any> = {
+      model:      this.claudeModel,
+      max_tokens: opts.maxTokens ?? this.defaultMaxTokens,
+      stream:     true,
+      messages:   convMsgs.map(m => ({ role: m.role, content: m.content })),
+    };
+    if (systemMsg) body.system = systemMsg.content;
+
+    try {
+      const httpResp = await axios.post(
+        `${this.claudeBaseUrl}/v1/messages`,
+        body,
+        {
+          headers: {
+            'x-api-key':         this.claudeApiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type':      'application/json',
+          },
+          responseType: 'stream',
+          timeout: 120_000,
+        },
+      );
+
+      await new Promise<void>((resolve, reject) => {
+        let buffer = '';
+
+        httpResp.data.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString();
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith(':')) continue;
+
+            if (trimmed.startsWith('data:')) {
+              const jsonStr = trimmed.slice(5).trim();
+              if (jsonStr === '[DONE]') continue;
+              try {
+                const event = JSON.parse(jsonStr);
+
+                if (event.type === 'content_block_delta' && event.delta?.text) {
+                  res.write(`data: ${JSON.stringify({ delta: event.delta.text })}\n\n`);
+                }
+                if (event.type === 'message_delta' && event.usage) {
+                  tokensUsed = (event.usage.input_tokens ?? 0) +
+                               (event.usage.output_tokens ?? 0);
+                }
+                if (event.type === 'message_stop') {
+                  resolve();
+                }
+              } catch { /* skip malformed JSON */ }
+            }
+          }
+        });
+
+        httpResp.data.on('end',   () => resolve());
+        httpResp.data.on('error', (e: Error) => reject(e));
+      });
+
+      const latencyMs = Date.now() - start;
+      res.write(`data: ${JSON.stringify({ done: true, tokensUsed, latencyMs, provider: 'claude' })}\n\n`);
+      res.end();
+      return { tokensUsed, latencyMs };
+    } catch (err) {
+      const msg = err?.response?.data?.error?.message || err.message;
+      this.logger.error(`Claude stream failed: ${msg}`);
+      res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
+      res.end();
+      return { tokensUsed, latencyMs: Date.now() - start };
+    }
   }
 
   // ─── Completions ──────────────────────────────────────────────────────────
 
   /** Non-streaming completion */
-  async complete(messages: LlmMessage[], opts: LlmOptions = {}): Promise<LlmResult> {
+  async complete(
+    messages: LlmMessage[],
+    opts: LlmOptions = {},
+    /** Optional: pre-resolved provider — avoids double auto-routing */
+    forceProvider?: Exclude<AiProvider, 'auto'>,
+  ): Promise<LlmResult> {
+    // Resolve 'auto' to a concrete provider
+    let provider: Exclude<AiProvider, 'auto'> = forceProvider ?? (
+      this.currentProvider === 'auto'
+        ? (() => {
+            const userMsg = [...messages].reverse().find(m => m.role === 'user');
+            const picked  = this.pickAutoProvider(userMsg?.content ?? '');
+            this.autoLastPicked = picked;
+            return picked;
+          })()
+        : this.currentProvider as Exclude<AiProvider, 'auto'>
+    );
+
+    if (provider === 'claude') {
+      return this.completeWithClaude(messages, opts);
+    }
+
     const start = Date.now();
+    const client = provider === 'deepseek' ? this.deepseekClient : this.ollamaClient;
+    const model  = provider === 'deepseek' ? this.deepseekModel  : this.ollamaModel;
+
     try {
-      const response = await this.activeClient.chat.completions.create({
-        model:       this.activeModel,
+      const response = await client.chat.completions.create({
+        model,
         messages,
         temperature: opts.temperature ?? this.defaultTemp,
         max_tokens:  opts.maxTokens  ?? this.defaultMaxTokens,
@@ -128,9 +356,9 @@ export class LlmService {
 
       const content    = response.choices[0]?.message?.content || '';
       const tokensUsed = response.usage?.total_tokens ?? 0;
-      return { content, tokensUsed, latencyMs: Date.now() - start };
+      return { content, tokensUsed, latencyMs: Date.now() - start, provider };
     } catch (err) {
-      this.logger.error(`LLM completion failed [${this.currentProvider}]: ${err.message}`);
+      this.logger.error(`LLM completion failed [${provider}]: ${err.message}`);
       throw err;
     }
   }
@@ -140,9 +368,23 @@ export class LlmService {
     messages: LlmMessage[],
     res: Response,
     opts: LlmOptions = {},
+    /** Optional: pre-resolved provider (e.g. from auto-routing in chat.service) */
+    forceProvider?: Exclude<AiProvider, 'auto'>,
   ): Promise<{ tokensUsed: number; latencyMs: number }> {
     const start = Date.now();
     let tokensUsed = 0;
+
+    // Resolve provider
+    let provider: Exclude<AiProvider, 'auto'> = forceProvider ?? (
+      this.currentProvider === 'auto'
+        ? (() => {
+            const userMsg = [...messages].reverse().find(m => m.role === 'user');
+            const picked  = this.pickAutoProvider(userMsg?.content ?? '');
+            this.autoLastPicked = picked;
+            return picked;
+          })()
+        : this.currentProvider as Exclude<AiProvider, 'auto'>
+    );
 
     // Only set headers if not already committed (chat.service sets them first)
     if (!res.headersSent) {
@@ -153,9 +395,16 @@ export class LlmService {
       res.flushHeaders();
     }
 
+    if (provider === 'claude') {
+      return this.streamWithClaude(messages, res, opts);
+    }
+
+    const client = provider === 'deepseek' ? this.deepseekClient : this.ollamaClient;
+    const model  = provider === 'deepseek' ? this.deepseekModel  : this.ollamaModel;
+
     try {
-      const stream = await this.activeClient.chat.completions.create({
-        model:       this.activeModel,
+      const stream = await client.chat.completions.create({
+        model,
         messages,
         temperature: opts.temperature ?? this.defaultTemp,
         max_tokens:  opts.maxTokens  ?? this.defaultMaxTokens,
@@ -169,11 +418,11 @@ export class LlmService {
       }
 
       const latencyMs = Date.now() - start;
-      res.write(`data: ${JSON.stringify({ done: true, tokensUsed, latencyMs, provider: this.currentProvider })}\n\n`);
+      res.write(`data: ${JSON.stringify({ done: true, tokensUsed, latencyMs, provider })}\n\n`);
       res.end();
       return { tokensUsed, latencyMs };
     } catch (err) {
-      this.logger.error(`LLM stream failed [${this.currentProvider}]: ${err.message}`);
+      this.logger.error(`LLM stream failed [${provider}]: ${err.message}`);
       res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
       res.end();
       return { tokensUsed, latencyMs: Date.now() - start };

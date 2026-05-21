@@ -210,34 +210,56 @@ export class PgIndexingService {
   // ─── companies ────────────────────────────────────────────────────────────
 
   private async indexCompanies(): Promise<void> {
-    const { data, total } = await this.pg.getCompanies(1, 500);
-    this.status.companies.pgRows = total;
-    if (!total) return;
+    // Fetch all companies in pages of 500 to handle large tables
+    let page = 1;
+    const PAGE = 500;
+    let total = 0;
+    let done = 0;
     let chunks = 0;
 
-    for (let i = 0; i < data.length; i++) {
-      const co = data[i];
-      const content = [
-        co.description || '',
-        co.sector  ? `Sector: ${co.sector}`    : '',
-        co.website ? `Website: ${co.website}`  : '',
-        co.founded ? `Founded: ${co.founded}`  : '',
-      ].filter(Boolean).join('\n');
+    // Get total first
+    const first = await this.pg.getCompanies(1, 1);
+    total = first.total;
+    this.status.companies.pgRows = total;
+    if (!total) return;
 
-      if (!content.trim()) continue;
-      const indexed = await this.rag.indexContent({
-        title:    `${co.name} (${co.symbol})`,
-        content,
-        sourceId: `pg:companies:${co.id}`,
-        type:     KnowledgeType.DOCUMENT,
-        url:      co.website || '',
-        metadata: { table: 'companies', pgId: co.id, sector: co.sector || '' },
-      });
-      chunks += indexed;
-      this.status.companies.progress      = Math.round(((i + 1) / data.length) * 100);
-      this.status.companies.indexedChunks = chunks;
+    while (true) {
+      const { data } = await this.pg.getCompanies(page, PAGE);
+      if (!data.length) break;
+
+      for (const co of data) {
+        // Use actual column names: long_name_en, short_name_en, long_name_ar, short_name_ar, url, clone_name, market_id
+        const nameEn = co.long_name_en  || co.short_name_en || co.symbol;
+        const nameAr = co.long_name_ar  || co.short_name_ar || '';
+        const content = [
+          nameEn                                          ? `Company: ${nameEn}`                 : '',
+          nameAr                                          ? `Arabic Name: ${nameAr}`              : '',
+          co.clone_name  && co.clone_name !== co.symbol  ? `Also known as: ${co.clone_name}`     : '',
+          co.market_id                                   ? `Market: ${co.market_id}`             : '',
+          co.url                                         ? `Website: ${co.url}`                  : '',
+        ].filter(Boolean).join('\n');
+
+        if (!content.trim()) continue;
+
+        const indexed = await this.rag.indexContent({
+          title:    `${nameEn} (${co.symbol})`,
+          content,
+          sourceId: `pg:companies:${co.id}`,
+          type:     KnowledgeType.DOCUMENT,
+          url:      co.url || '',
+          language: nameAr ? 'ar' : 'en',
+          metadata: { table: 'companies', pgId: co.id, symbol: co.symbol, market: co.market_id || '' },
+        });
+        chunks += indexed;
+        done++;
+        this.status.companies.progress      = Math.round((done / total) * 100);
+        this.status.companies.indexedChunks = chunks;
+      }
+
+      page++;
+      if (data.length < PAGE) break;
     }
-    this.logger.log(`companies: indexed ${data.length} rows → ${chunks} chunks`);
+    this.logger.log(`companies: indexed ${done} rows → ${chunks} chunks`);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

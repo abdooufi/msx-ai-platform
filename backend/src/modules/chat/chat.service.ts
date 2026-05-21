@@ -183,20 +183,28 @@ export class ChatService {
     let tokensUsed = 0;
     let latencyMs = 0;
 
+    // For 'auto' mode: pre-resolve provider so both stream + complete use the same one
+    let resolvedProvider: 'ollama' | 'deepseek' | 'claude' | undefined;
+    const info = this.llm.getProviderInfo();
+    if (info.provider === 'auto') {
+      resolvedProvider = this.llm.pickAutoProvider(dto.message, !!liveData);
+    }
+
     try {
       // Intercept the stream to capture the full response for saving
       const { tokensUsed: t, latencyMs: l } = await this.llm.streamToResponse(
         messages,
         res,
         { stream: true },
+        resolvedProvider,
       );
       tokensUsed = t;
       latencyMs = l;
 
       // We need the full text — re-run without stream for saving
       // (In production you'd buffer the stream instead for efficiency)
-      const result = await this.llm.complete(messages);
-      fullResponse = result.content;
+      const result = await this.llm.complete(messages, {}, resolvedProvider);
+      fullResponse  = result.content;
     } catch (err) {
       this.logger.error(`Chat stream error: ${err.message}`);
       fullResponse = language === 'ar'

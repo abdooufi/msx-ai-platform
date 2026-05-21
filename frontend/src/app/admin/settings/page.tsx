@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import {
   Settings, Cpu, Database, Globe, Zap, Shield,
   RefreshCcw, CheckCircle, Copy, ExternalLink, Info,
-  Loader2, AlertTriangle,
+  Loader2, AlertTriangle, Sparkles, Shuffle,
 } from 'lucide-react'
 import { getStats } from '../../../lib/api'
 import api from '../../../lib/api'
@@ -17,20 +17,64 @@ interface EnvSetting {
   sensitive?: boolean
 }
 
+type AiProvider = 'ollama' | 'deepseek' | 'claude' | 'auto'
+
 interface ProviderInfo {
-  provider: 'ollama' | 'deepseek'
+  provider: AiProvider
   model: string
   ollamaUrl: string
   ollamaModel: string
   deepseekModel: string
   deepseekConfigured: boolean
+  claudeModel: string
+  claudeConfigured: boolean
+  autoLastPicked?: string
+}
+
+const PROVIDER_META: Record<AiProvider, {
+  emoji: string
+  label: string
+  badge: string
+  badgeColor: string
+  activeColor: string
+  dotColor: string
+  desc: string
+}> = {
+  ollama: {
+    emoji: '🦙', label: 'Ollama', badge: 'Local',
+    badgeColor: 'text-green-400 bg-green-900/30',
+    activeColor: 'border-purple-500 bg-purple-900/20',
+    dotColor: 'bg-purple-400',
+    desc: 'Self-hosted model on your hardware. Free, private, no internet required.',
+  },
+  deepseek: {
+    emoji: '🌊', label: 'DeepSeek', badge: 'Cloud API',
+    badgeColor: 'text-blue-400 bg-blue-900/30',
+    activeColor: 'border-blue-500 bg-blue-900/20',
+    dotColor: 'bg-blue-400',
+    desc: 'DeepSeek cloud API. Fast, powerful, great for code & analysis.',
+  },
+  claude: {
+    emoji: '✦', label: 'Claude', badge: 'Anthropic',
+    badgeColor: 'text-orange-400 bg-orange-900/30',
+    activeColor: 'border-orange-500 bg-orange-900/20',
+    dotColor: 'bg-orange-400',
+    desc: 'Anthropic Claude API. Excellent multilingual support, strong reasoning.',
+  },
+  auto: {
+    emoji: '⚡', label: 'Auto', badge: 'Smart',
+    badgeColor: 'text-yellow-400 bg-yellow-900/30',
+    activeColor: 'border-yellow-500 bg-yellow-900/20',
+    dotColor: 'bg-yellow-400',
+    desc: 'Auto-routes between Ollama and DeepSeek based on query length and live data. Claude stays manual.',
+  },
 }
 
 export default function SettingsPage() {
-  const [stats, setStats]             = useState<any>(null)
-  const [loading, setLoading]         = useState(false)
-  const [provider, setProvider]       = useState<ProviderInfo | null>(null)
-  const [switching, setSwitching]     = useState(false)
+  const [stats, setStats]         = useState<any>(null)
+  const [loading, setLoading]     = useState(false)
+  const [provider, setProvider]   = useState<ProviderInfo | null>(null)
+  const [switching, setSwitching] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -50,13 +94,17 @@ export default function SettingsPage() {
 
   useEffect(() => { load() }, [])
 
-  const switchProvider = async (target: 'ollama' | 'deepseek') => {
+  const switchProvider = async (target: AiProvider) => {
     if (!provider || provider.provider === target || switching) return
     setSwitching(true)
     try {
       const res = await api.post('/admin/ai-provider', { provider: target })
       setProvider(res.data)
-      toast.success(`Switched to ${target === 'deepseek' ? 'DeepSeek API' : 'Ollama (local)'}`)
+      const labels: Record<AiProvider, string> = {
+        ollama: 'Ollama (local)', deepseek: 'DeepSeek API',
+        claude: 'Claude API', auto: 'Auto (smart routing)',
+      }
+      toast.success(`Switched to ${labels[target]}`)
     } catch (err: any) {
       const msg = err?.response?.data?.message || err.message
       toast.error(msg)
@@ -67,6 +115,12 @@ export default function SettingsPage() {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text).then(() => toast.success('Copied!'))
+  }
+
+  const isAvailable = (p: AiProvider, info: ProviderInfo) => {
+    if (p === 'deepseek') return info.deepseekConfigured
+    if (p === 'claude')   return info.claudeConfigured
+    return true // ollama and auto are always available
   }
 
   return (
@@ -96,67 +150,62 @@ export default function SettingsPage() {
 
         {provider ? (
           <div className="space-y-4">
-            {/* Toggle row */}
+            {/* 2×2 provider card grid */}
             <div className="grid grid-cols-2 gap-3">
-              {/* Ollama card */}
-              <button
-                onClick={() => switchProvider('ollama')}
-                disabled={switching || provider.provider === 'ollama'}
-                className={`relative rounded-xl border p-4 text-left transition-all ${
-                  provider.provider === 'ollama'
-                    ? 'border-purple-500 bg-purple-900/20 cursor-default'
-                    : 'border-gray-700 bg-gray-800/40 hover:border-gray-500 cursor-pointer'
-                }`}
-              >
-                {provider.provider === 'ollama' && (
-                  <span className="absolute top-2.5 right-2.5 text-[10px] font-bold text-purple-400 bg-purple-900/60 px-1.5 py-0.5 rounded-full">
-                    ACTIVE
-                  </span>
-                )}
-                <div className="flex items-center gap-2 mb-2">
-                  {/* Ollama flame icon */}
-                  <span className="text-lg">🦙</span>
-                  <span className="font-semibold text-white text-sm">Ollama</span>
-                  <span className="text-[10px] text-green-400 bg-green-900/30 px-1.5 py-0.5 rounded-full">Local</span>
-                </div>
-                <p className="text-xs text-gray-400">Self-hosted model on your hardware. Free, private, no internet required.</p>
-                <p className="text-xs text-gray-500 mt-2 font-mono">
-                  {provider.ollamaModel}
-                </p>
-              </button>
+              {(['ollama', 'deepseek', 'claude', 'auto'] as AiProvider[]).map(p => {
+                const meta      = PROVIDER_META[p]
+                const available = isAvailable(p, provider)
+                const active    = provider.provider === p
 
-              {/* DeepSeek card */}
-              <button
-                onClick={() => switchProvider('deepseek')}
-                disabled={switching || provider.provider === 'deepseek' || !provider.deepseekConfigured}
-                className={`relative rounded-xl border p-4 text-left transition-all ${
-                  provider.provider === 'deepseek'
-                    ? 'border-blue-500 bg-blue-900/20 cursor-default'
-                    : provider.deepseekConfigured
-                    ? 'border-gray-700 bg-gray-800/40 hover:border-gray-500 cursor-pointer'
-                    : 'border-gray-800 bg-gray-800/20 cursor-not-allowed opacity-60'
-                }`}
-              >
-                {provider.provider === 'deepseek' && (
-                  <span className="absolute top-2.5 right-2.5 text-[10px] font-bold text-blue-400 bg-blue-900/60 px-1.5 py-0.5 rounded-full">
-                    ACTIVE
-                  </span>
-                )}
-                {!provider.deepseekConfigured && (
-                  <span className="absolute top-2.5 right-2.5 text-[10px] font-bold text-yellow-500 bg-yellow-900/40 px-1.5 py-0.5 rounded-full">
-                    NOT SET
-                  </span>
-                )}
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">🌊</span>
-                  <span className="font-semibold text-white text-sm">DeepSeek</span>
-                  <span className="text-[10px] text-blue-400 bg-blue-900/30 px-1.5 py-0.5 rounded-full">Cloud API</span>
-                </div>
-                <p className="text-xs text-gray-400">DeepSeek cloud API. Fast, powerful, requires API key & internet.</p>
-                <p className="text-xs text-gray-500 mt-2 font-mono">
-                  {provider.deepseekModel}
-                </p>
-              </button>
+                // Model label per card
+                const modelLabel = p === 'ollama'   ? provider.ollamaModel
+                                 : p === 'deepseek' ? provider.deepseekModel
+                                 : p === 'claude'   ? provider.claudeModel
+                                 : `routes to: ${provider.autoLastPicked || 'best match'}`
+
+                return (
+                  <button
+                    key={p}
+                    onClick={() => switchProvider(p)}
+                    disabled={switching || active || !available}
+                    className={`relative rounded-xl border p-4 text-left transition-all ${
+                      active
+                        ? `${meta.activeColor} cursor-default`
+                        : available
+                        ? 'border-gray-700 bg-gray-800/40 hover:border-gray-500 cursor-pointer'
+                        : 'border-gray-800 bg-gray-800/20 cursor-not-allowed opacity-50'
+                    }`}
+                  >
+                    {/* Active badge */}
+                    {active && (
+                      <span className={`absolute top-2.5 right-2.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full
+                        ${p === 'ollama'   ? 'text-purple-400 bg-purple-900/60' :
+                          p === 'deepseek' ? 'text-blue-400 bg-blue-900/60'     :
+                          p === 'claude'   ? 'text-orange-400 bg-orange-900/60' :
+                                            'text-yellow-400 bg-yellow-900/60'}`}>
+                        ACTIVE
+                      </span>
+                    )}
+
+                    {/* Not-configured badge */}
+                    {!available && !active && (
+                      <span className="absolute top-2.5 right-2.5 text-[10px] font-bold text-yellow-500 bg-yellow-900/40 px-1.5 py-0.5 rounded-full">
+                        NOT SET
+                      </span>
+                    )}
+
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-lg">{meta.emoji}</span>
+                      <span className="font-semibold text-white text-sm">{meta.label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${meta.badgeColor}`}>
+                        {meta.badge}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-400">{meta.desc}</p>
+                    <p className="text-xs text-gray-500 mt-2 font-mono truncate">{modelLabel}</p>
+                  </button>
+                )
+              })}
             </div>
 
             {/* Current status bar */}
@@ -164,17 +213,24 @@ export default function SettingsPage() {
               {switching ? (
                 <Loader2 size={14} className="text-blue-400 animate-spin" />
               ) : (
-                <span className={`w-2 h-2 rounded-full ${
-                  provider.provider === 'deepseek' ? 'bg-blue-400' : 'bg-purple-400'
-                } animate-pulse`} />
+                <span className={`w-2 h-2 rounded-full ${PROVIDER_META[provider.provider].dotColor} animate-pulse`} />
               )}
               <span className="text-xs text-gray-400">
                 {switching ? 'Switching provider…' : (
                   <>
-                    Currently using <span className="text-white font-medium">{provider.model}</span>
-                    {' '}via <span className={`font-medium ${provider.provider === 'deepseek' ? 'text-blue-400' : 'text-purple-400'}`}>
-                      {provider.provider === 'deepseek' ? 'DeepSeek API' : 'Ollama (local)'}
+                    Using{' '}
+                    <span className={`font-medium ${
+                      provider.provider === 'ollama'   ? 'text-purple-400' :
+                      provider.provider === 'deepseek' ? 'text-blue-400'   :
+                      provider.provider === 'claude'   ? 'text-orange-400' :
+                                                         'text-yellow-400'
+                    }`}>
+                      {PROVIDER_META[provider.provider].label}
                     </span>
+                    {provider.provider === 'auto' && provider.autoLastPicked
+                      ? ` → last picked: ${provider.autoLastPicked}`
+                      : ` — ${provider.model}`
+                    }
                   </>
                 )}
               </span>
@@ -183,29 +239,65 @@ export default function SettingsPage() {
               </span>
             </div>
 
-            {/* DeepSeek setup instructions when not configured */}
-            {!provider.deepseekConfigured && (
+            {/* Auto mode explanation */}
+            {provider.provider === 'auto' && (
               <div className="flex items-start gap-3 bg-yellow-900/10 border border-yellow-800/30 rounded-lg p-4">
-                <AlertTriangle size={15} className="text-yellow-500 mt-0.5 flex-shrink-0" />
-                <div className="space-y-2">
-                  <p className="text-xs font-medium text-yellow-400">DeepSeek API key not configured</p>
-                  <p className="text-xs text-gray-400">
-                    Get a free API key at{' '}
-                    <a href="https://platform.deepseek.com" target="_blank" rel="noreferrer"
-                      className="text-blue-400 hover:underline">
-                      platform.deepseek.com
-                    </a>
-                    , then add it to your <code className="bg-gray-800 px-1 rounded">.env</code> file:
-                  </p>
-                  <pre className="text-xs text-green-400 font-mono bg-gray-900/60 rounded px-3 py-2">
-{`DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
-DEEPSEEK_MODEL=deepseek-chat`}
-                  </pre>
-                  <p className="text-xs text-gray-500">
-                    Then run: <code className="bg-gray-800 px-1 rounded">docker compose up -d --build backend</code>
-                  </p>
+                <Shuffle size={15} className="text-yellow-500 mt-0.5 flex-shrink-0" />
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-yellow-400">Auto-routing rules (Ollama ↔ DeepSeek only)</p>
+                  <ul className="text-xs text-gray-400 space-y-0.5 list-disc list-inside">
+                    <li>Live data + short price query → <span className="text-purple-300">Ollama</span> (fast, data already injected)</li>
+                    <li>Short query (≤5 words) → <span className="text-purple-300">Ollama</span> (fast local)</li>
+                    <li>Longer / complex question → <span className="text-blue-300">DeepSeek</span> (if configured)</li>
+                    <li>Fallback → <span className="text-purple-300">Ollama</span></li>
+                  </ul>
+                  <p className="text-xs text-gray-500 pt-1">Claude is always a manual choice — select it above to use it.</p>
                 </div>
               </div>
+            )}
+
+            {/* Setup tips for unconfigured providers */}
+            {!provider.deepseekConfigured && (
+              <SetupTip
+                icon={<AlertTriangle size={15} className="text-yellow-500 mt-0.5 flex-shrink-0" />}
+                title="DeepSeek API key not configured"
+                borderColor="border-yellow-800/30"
+                bgColor="bg-yellow-900/10"
+                titleColor="text-yellow-400"
+              >
+                <p className="text-xs text-gray-400">
+                  Get a free key at{' '}
+                  <a href="https://platform.deepseek.com" target="_blank" rel="noreferrer"
+                    className="text-blue-400 hover:underline">platform.deepseek.com</a>, then add to <code className="bg-gray-800 px-1 rounded">.env</code>:
+                </p>
+                <pre className="text-xs text-green-400 font-mono bg-gray-900/60 rounded px-3 py-2">
+{`DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+DEEPSEEK_MODEL=deepseek-chat`}
+                </pre>
+              </SetupTip>
+            )}
+
+            {!provider.claudeConfigured && (
+              <SetupTip
+                icon={<Sparkles size={15} className="text-orange-400 mt-0.5 flex-shrink-0" />}
+                title="Claude API key not configured"
+                borderColor="border-orange-800/30"
+                bgColor="bg-orange-900/10"
+                titleColor="text-orange-400"
+              >
+                <p className="text-xs text-gray-400">
+                  Get an API key at{' '}
+                  <a href="https://console.anthropic.com" target="_blank" rel="noreferrer"
+                    className="text-blue-400 hover:underline">console.anthropic.com</a>, then add to <code className="bg-gray-800 px-1 rounded">.env</code>:
+                </p>
+                <pre className="text-xs text-green-400 font-mono bg-gray-900/60 rounded px-3 py-2">
+{`CLAUDE_API_KEY=sk-ant-xxxxxxxxxxxxxxxxx
+CLAUDE_MODEL=claude-3-5-haiku-20241022`}
+                </pre>
+                <p className="text-xs text-gray-500">
+                  Then rebuild: <code className="bg-gray-800 px-1 rounded">docker compose up -d --build backend</code>
+                </p>
+              </SetupTip>
             )}
           </div>
         ) : (
@@ -229,15 +321,17 @@ DEEPSEEK_MODEL=deepseek-chat`}
       <Section
         icon={<Cpu size={16} className="text-purple-400" />}
         title="Language Model"
-        description="Ollama and DeepSeek model configuration"
+        description="Ollama, DeepSeek and Claude model configuration"
       >
         <EnvTable settings={[
-          { key: 'AI_PROVIDER',      value: 'ollama',           description: 'Active provider: ollama | deepseek. Can be toggled above without rebuild.' },
-          { key: 'LLM_MODEL',        value: 'qwen2.5:7b',       description: 'Ollama model used when AI_PROVIDER=ollama.' },
-          { key: 'DEEPSEEK_MODEL',   value: 'deepseek-chat',    description: 'DeepSeek model used when AI_PROVIDER=deepseek.' },
-          { key: 'DEEPSEEK_API_KEY', value: '••••••••••••••••', description: 'DeepSeek API key from platform.deepseek.com.', sensitive: true },
-          { key: 'EMBEDDING_MODEL',  value: 'nomic-embed-text', description: 'Always uses Ollama — DeepSeek has no embedding API.' },
-          { key: 'OLLAMA_URL',       value: 'http://…:11434',   description: 'Ollama API host (used for both LLM and embeddings when active).' },
+          { key: 'AI_PROVIDER',    value: 'ollama',              description: 'Active provider: ollama | deepseek | claude | auto. Switchable live above.' },
+          { key: 'LLM_MODEL',      value: 'qwen2.5:7b',          description: 'Ollama model used when AI_PROVIDER=ollama.' },
+          { key: 'DEEPSEEK_MODEL', value: 'deepseek-chat',        description: 'DeepSeek model used when AI_PROVIDER=deepseek.' },
+          { key: 'DEEPSEEK_API_KEY', value: '••••••••••••••••',  description: 'DeepSeek API key from platform.deepseek.com.', sensitive: true },
+          { key: 'CLAUDE_MODEL',   value: 'claude-3-5-haiku-20241022', description: 'Claude model used when AI_PROVIDER=claude or auto.' },
+          { key: 'CLAUDE_API_KEY', value: '••••••••••••••••',    description: 'Anthropic API key from console.anthropic.com.', sensitive: true },
+          { key: 'EMBEDDING_MODEL', value: 'nomic-embed-text',   description: 'Always uses Ollama — vector embeddings are local.' },
+          { key: 'OLLAMA_URL',     value: 'http://…:11434',       description: 'Ollama API host (LLM + embeddings when active).' },
         ]} onCopy={copyToClipboard} />
       </Section>
 
@@ -248,16 +342,16 @@ DEEPSEEK_MODEL=deepseek-chat`}
         description="Retrieval-Augmented Generation settings"
       >
         <EnvTable settings={[
-          { key: 'RAG_TOP_K',              value: '5',                description: 'Knowledge chunks retrieved per query.' },
-          { key: 'RAG_SCORE_THRESHOLD',    value: '0.5',              description: 'Minimum similarity score to include a chunk.' },
-          { key: 'QDRANT_COLLECTION_SIZE', value: '768',              description: 'Vector dimensions — must match embedding model.' },
+          { key: 'RAG_TOP_K',              value: '5',                  description: 'Knowledge chunks retrieved per query.' },
+          { key: 'RAG_SCORE_THRESHOLD',    value: '0.5',                description: 'Minimum similarity score to include a chunk.' },
+          { key: 'QDRANT_COLLECTION_SIZE', value: '768',                description: 'Vector dimensions — must match embedding model.' },
           { key: 'QDRANT_URL',             value: 'http://qdrant:6333', description: 'Qdrant vector database URL.' },
         ]} onCopy={copyToClipboard} />
 
         {stats?.ragStats && (
           <div className="mt-4 grid grid-cols-2 gap-3">
-            <StatBox label="Vectors indexed"      value={stats.ragStats.qdrantVectors?.toLocaleString() ?? '—'} color="blue" />
-            <StatBox label="Knowledge documents"  value={stats.ragStats.mongoDocuments?.toLocaleString() ?? '—'} color="purple" />
+            <StatBox label="Vectors indexed"     value={stats.ragStats.qdrantVectors?.toLocaleString() ?? '—'} color="blue" />
+            <StatBox label="Knowledge documents" value={stats.ragStats.mongoDocuments?.toLocaleString() ?? '—'} color="purple" />
           </div>
         )}
       </Section>
@@ -282,10 +376,10 @@ DEEPSEEK_MODEL=deepseek-chat`}
         description="JWT, admin credentials, and rate limits"
       >
         <EnvTable settings={[
-          { key: 'JWT_SECRET',      value: '••••••••••••••••', description: 'JWT signing secret — use 64 random chars in production.', sensitive: true },
-          { key: 'ADMIN_EMAIL',     value: 'admin@msx.om',    description: 'Default admin account email.' },
-          { key: 'ADMIN_PASSWORD',  value: '••••••••••',      description: 'Default admin password — change before going to production!', sensitive: true },
-          { key: 'JWT_EXPIRES_IN',  value: '8h',              description: 'Token expiry duration.' },
+          { key: 'JWT_SECRET',     value: '••••••••••••••••', description: 'JWT signing secret — use 64 random chars in production.', sensitive: true },
+          { key: 'ADMIN_EMAIL',    value: 'admin@msx.om',    description: 'Default admin account email.' },
+          { key: 'ADMIN_PASSWORD', value: '••••••••••',      description: 'Default admin password — change before going to production!', sensitive: true },
+          { key: 'JWT_EXPIRES_IN', value: '8h',              description: 'Token expiry duration.' },
         ]} onCopy={copyToClipboard} />
 
         <div className="mt-4 space-y-2">
@@ -294,7 +388,7 @@ DEEPSEEK_MODEL=deepseek-chat`}
             'Change JWT_SECRET to a 64-char random string',
             'Change ADMIN_PASSWORD to a strong password',
             'Set MONGO_PASS to a strong password',
-            'Add DEEPSEEK_API_KEY if using DeepSeek provider',
+            'Add DEEPSEEK_API_KEY or CLAUDE_API_KEY for cloud AI',
             'Enable SSL in nginx/nginx.conf',
           ].map((item, i) => (
             <div key={i} className="flex items-center gap-2 text-xs text-gray-400">
@@ -363,6 +457,10 @@ DEEPSEEK_MODEL=deepseek-chat`}
           className="flex items-center gap-1 hover:text-blue-400 transition">
           <ExternalLink size={11} /> DeepSeek Platform
         </a>
+        <a href="https://console.anthropic.com" target="_blank" rel="noreferrer"
+          className="flex items-center gap-1 hover:text-blue-400 transition">
+          <ExternalLink size={11} /> Anthropic Console
+        </a>
         <a href="/docs" target="_blank" rel="noreferrer"
           className="flex items-center gap-1 hover:text-blue-400 transition">
           <ExternalLink size={11} /> Swagger API Docs
@@ -373,6 +471,27 @@ DEEPSEEK_MODEL=deepseek-chat`}
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
+
+function SetupTip({
+  icon, title, borderColor, bgColor, titleColor, children,
+}: {
+  icon: React.ReactNode
+  title: string
+  borderColor: string
+  bgColor: string
+  titleColor: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className={`flex items-start gap-3 border rounded-lg p-4 ${bgColor} ${borderColor}`}>
+      {icon}
+      <div className="space-y-2 min-w-0">
+        <p className={`text-xs font-medium ${titleColor}`}>{title}</p>
+        {children}
+      </div>
+    </div>
+  )
+}
 
 function Section({ icon, title, description, children }: {
   icon: React.ReactNode; title: string; description: string; children: React.ReactNode
