@@ -587,6 +587,7 @@ const EMPTY_COMPANY = {
   symbol: '', long_name_en: '', long_name_ar: '',
   short_name_en: '', short_name_ar: '',
   type: '', sector_id: '', market_id: '', status_id: '',
+  clone_name: '', url: '',
 }
 
 function CompaniesPanel() {
@@ -656,8 +657,9 @@ function CompaniesPanel() {
                 <th className="text-left px-4 py-3 text-gray-400 font-medium w-24">Symbol</th>
                 <th className="text-left px-4 py-3 text-gray-400 font-medium">Name (EN)</th>
                 <th className="text-left px-4 py-3 text-gray-400 font-medium">Name (AR)</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Type</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium">Aliases</th>
                 <th className="text-left px-4 py-3 text-gray-400 font-medium">Market</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium">URL</th>
                 <th className="px-4 py-3 w-20" />
               </tr>
             </thead>
@@ -669,14 +671,26 @@ function CompaniesPanel() {
                       {row.symbol || '—'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-white font-medium max-w-[200px] truncate">
+                  <td className="px-4 py-3 text-white font-medium max-w-[180px] truncate">
                     {row.long_name_en || row.short_name_en || '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-400 text-xs max-w-[180px] truncate text-right" dir="rtl">
+                  <td className="px-4 py-3 text-gray-400 text-xs max-w-[150px] truncate text-right" dir="rtl">
                     {row.long_name_ar || row.short_name_ar || '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-400 text-xs">{row.type || '—'}</td>
+                  <td className="px-4 py-3 text-gray-500 text-xs max-w-[160px] truncate">
+                    {row.clone_name || <span className="text-gray-700">—</span>}
+                  </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{row.market_id || '—'}</td>
+                  <td className="px-4 py-3 text-xs">
+                    {row.url
+                      ? <a href={row.url} target="_blank" rel="noopener noreferrer"
+                           className="text-blue-400 hover:underline flex items-center gap-1">
+                          <Globe size={11} />
+                          {row.url.replace(/^https?:\/\/[^/]+/, '').slice(0, 25) || '/'}
+                        </a>
+                      : <span className="text-gray-700">—</span>
+                    }
+                  </td>
                   <td className="px-4 py-3">
                     <div className="flex gap-2 justify-center">
                       <button onClick={() => setEditing({ ...EMPTY_COMPANY, ...row })} className="text-blue-400 hover:text-blue-300"><Pencil size={14} /></button>
@@ -686,7 +700,7 @@ function CompaniesPanel() {
                 </tr>
               ))}
               {!rows.length && (
-                <tr><td colSpan={6} className="text-center text-gray-500 py-8">No companies found</td></tr>
+                <tr><td colSpan={7} className="text-center text-gray-500 py-8">No companies found</td></tr>
               )}
             </tbody>
           </table>
@@ -806,6 +820,38 @@ function CompaniesPanel() {
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
                   />
                 </div>
+              </div>
+
+              {/* Row 5: Clone names */}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">
+                  Aliases / Clone Names
+                  <span className="ml-2 text-gray-600 font-normal">
+                    — comma-separated alternative names the chatbot recognises
+                  </span>
+                </label>
+                <input
+                  value={editing.clone_name || ''}
+                  onChange={e => setEditing({ ...editing, clone_name: e.target.value })}
+                  placeholder="e.g. Oman Qatariya, OQ, أومان قطارية"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-teal-500"
+                />
+              </div>
+
+              {/* Row 6: URL */}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">
+                  MSX.om Company URL
+                  <span className="ml-2 text-gray-600 font-normal">
+                    — e.g. https://www.msx.om/company/oqep
+                  </span>
+                </label>
+                <input
+                  value={editing.url || ''}
+                  onChange={e => setEditing({ ...editing, url: e.target.value })}
+                  placeholder="https://www.msx.om/company/..."
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono text-xs placeholder-gray-600 focus:outline-none focus:border-teal-500"
+                />
               </div>
             </div>
 

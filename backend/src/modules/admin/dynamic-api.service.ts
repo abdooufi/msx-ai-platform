@@ -541,9 +541,30 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  /** Alias kept for backward compat in ChatService */
+  /** Alias kept for backward compat */
   extractSymbol(message: string): string | null {
     return this.detectCompanyQuery(message);
+  }
+
+  /**
+   * Full symbol resolution:
+   * 1. Fast static pattern matching (no DB hit)
+   * 2. DB fallback — searches clone_name, all name columns, symbol
+   *
+   * Use this in ChatService instead of the sync extractSymbol().
+   */
+  async resolveSymbolWithDb(message: string): Promise<string | null> {
+    // 1. Static — covers known symbols, URL params, uppercase tickers
+    const fast = this.detectCompanyQuery(message);
+    if (fast) return fast;
+
+    // 2. DB fallback — uses clone_name + all name columns
+    try {
+      return await this.pg.findCompanyByAlias(message);
+    } catch (err: any) {
+      this.logger.warn(`DB alias lookup failed: ${err.message}`);
+      return null;
+    }
   }
 
   // ─── Time period detection ────────────────────────────────────────────────

@@ -2,7 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 import { SCRAPER_QUEUE, CrawlJobType } from './scraper.constants';
+import { ChatbootPgService } from '../admin/chatboot-pg.service';
+
+const SITEMAP_URL  = 'https://www.msx.om/sitemap.aspx';
+const MSX_BASE     = 'https://www.msx.om';
+const MAX_SITEMAP_URLS = 2000;
 
 @Injectable()
 export class ScraperService {
@@ -11,11 +18,14 @@ export class ScraperService {
   constructor(
     @InjectQueue(SCRAPER_QUEUE) private scraperQueue: Queue,
     private config: ConfigService,
+    private pg: ChatbootPgService,
   ) {}
 
-  /** Enqueue a full site crawl */
+  // ─── Existing single-URL crawl ────────────────────────────────────────────
+
+  /** Enqueue a full recursive site crawl */
   async startSiteCrawl(url?: string): Promise<{ jobId: string | number }> {
-    const targetUrl = url || this.config.get<string>('SCRAPER_TARGET_URL', 'https://www.msx.om');
+    const targetUrl = url || this.config.get<string>('SCRAPER_TARGET_URL', MSX_BASE);
     const job = await this.scraperQueue.add(
       CrawlJobType.CRAWL_SITE,
       { url: targetUrl, depth: 0, maxDepth: 3 },
@@ -35,10 +45,177 @@ export class ScraperService {
     return { jobId: job.id };
   }
 
+  // ─── Sitemap crawl ────────────────────────────────────────────────────────
+
+  /**
+   * Fetch https://www.msx.om/sitemap.aspx, extract every URL from it
+   * (handles both XML <loc> tags and plain HTML links), then enqueue
+   * a CRAWL_PAGE job for each one.
+   */
+  async startSitemapCrawl(): Promise<{ queued: number; urls: string[] }> {
+    this.logger.log(`🗺️ Fetching sitemap: ${SITEMAP_URL}`);
+    const urls = await this.parseSitemap(SITEMAP_URL);
+
+    const jobs = await Promise.all(
+      urls.map(url =>
+        this.scraperQueue.add(
+          CrawlJobType.CRAWL_PAGE,
+          { url },
+          { priority: 4, attempts: 2 },
+        ),
+      ),
+    );
+
+    this.logger.log(`🗺️ Sitemap: queued ${jobs.length} page jobs`);
+    return { queued: jobs.length, urls };
+  }
+
+  /**
+   * Parse a sitemap URL and return all page URLs found.
+   * Handles:  XML sitemaps (<loc> tags) · sitemap-index (<sitemap><loc>) ·
+   *           HTML pages (href links on the same domain).
+   */
+  async parseSitemap(sitemapUrl: string): Promise<string[]> {
+    let html: string;
+    try {
+      const { data } = await axios.get(sitemapUrl, {
+        timeout: 20_000,
+        headers: {
+          'User-Agent': 'MSXBot/1.0 (+https://www.msx.om/bot)',
+          Accept: 'text/html,application/xml,application/xhtml+xml,*/*',
+        },
+        responseType: 'text',
+      });
+      html = typeof data === 'string' ? data : JSON.stringify(data);
+    } catch (err: any) {
+      this.logger.warn(`Failed to fetch sitemap ${sitemapUrl}: ${err.message}`);
+      return [];
+    }
+
+    const urls: string[] = [];
+
+    // 1. XML sitemap: look for <loc>…</loc>
+    if (html.includes('<loc>') || html.includes('<?xml')) {
+      for (const m of html.matchAll(/<loc>\s*(https?[^<\s]+)\s*<\/loc>/g)) {
+        const u = m[1].trim();
+        if (u.startsWith(MSX_BASE)) urls.push(u);
+      }
+      // Recurse into sitemap-index nested sitemaps
+      const nested: string[] = [];
+      for (const m of html.matchAll(/<sitemap>[\s\S]*?<loc>\s*(https?[^<\s]+)\s*<\/loc>/g)) {
+        nested.push(m[1].trim());
+      }
+      for (const nsUrl of nested) {
+        const sub = await this.parseSitemap(nsUrl);
+        urls.push(...sub);
+      }
+      if (urls.length) {
+        return [...new Set(this.filterUrls(urls))].slice(0, MAX_SITEMAP_URLS);
+      }
+    }
+
+    // 2. HTML: extract same-domain anchor links
+    const $ = cheerio.load(html);
+    $('a[href]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      try {
+        const resolved = new URL(href, MSX_BASE);
+        if (resolved.hostname === 'www.msx.om') {
+          urls.push(resolved.origin + resolved.pathname);
+        }
+      } catch { /* invalid URL */ }
+    });
+
+    return [...new Set(this.filterUrls(urls))].slice(0, MAX_SITEMAP_URLS);
+  }
+
+  private filterUrls(urls: string[]): string[] {
+    return urls.filter(
+      u => u && !u.match(/\.(jpg|jpeg|png|gif|svg|ico|css|js|zip|pdf|doc|xls)$/i),
+    );
+  }
+
+  // ─── Company URL crawl ───────────────────────────────────────────────────
+
+  /**
+   * Fetch all company URLs from the `companies` table (where url IS NOT NULL)
+   * and enqueue a CRAWL_PAGE job for each one.
+   */
+  async startCompanyCrawl(): Promise<{ queued: number; companies: { symbol: string; url: string }[] }> {
+    const companies = await this.pg.getCompanyUrlsForCrawl();
+
+    if (!companies.length) {
+      this.logger.warn('Company crawl: no URLs found in companies table');
+      return { queued: 0, companies: [] };
+    }
+
+    await Promise.all(
+      companies.map(c =>
+        this.scraperQueue.add(
+          CrawlJobType.CRAWL_PAGE,
+          { url: c.url },
+          { priority: 4, attempts: 2 },
+        ),
+      ),
+    );
+
+    this.logger.log(`🏢 Company crawl: queued ${companies.length} company page jobs`);
+    return { queued: companies.length, companies };
+  }
+
+  // ─── "Crawl Everything" ───────────────────────────────────────────────────
+
+  /**
+   * Trigger all three crawl sources at once:
+   *   1. Sitemap    — all URLs from sitemap.aspx
+   *   2. Companies  — all URLs from companies table
+   *   3. Site crawl — recursive general crawl from MSX_BASE
+   */
+  async startAllCrawl(customUrl?: string): Promise<{
+    sitemap:   { queued: number; urls: string[] };
+    companies: { queued: number; companies: { symbol: string; url: string }[] };
+    site:      { jobId: string | number };
+  }> {
+    const [sitemapResult, companyResult, siteResult] = await Promise.all([
+      this.startSitemapCrawl().catch(err => {
+        this.logger.error(`Sitemap crawl failed: ${err.message}`);
+        return { queued: 0, urls: [] as string[] };
+      }),
+      this.startCompanyCrawl().catch(err => {
+        this.logger.error(`Company crawl failed: ${err.message}`);
+        return { queued: 0, companies: [] as { symbol: string; url: string }[] };
+      }),
+      this.startSiteCrawl(customUrl),
+    ]);
+
+    this.logger.log(
+      `🚀 All-sources crawl queued — sitemap: ${sitemapResult.queued}, ` +
+      `companies: ${companyResult.queued}, site: 1`,
+    );
+    return { sitemap: sitemapResult, companies: companyResult, site: siteResult };
+  }
+
+  // ─── Status ───────────────────────────────────────────────────────────────
+
+  async getQueueStats() {
+    const [waiting, active, completed, failed] = await Promise.all([
+      this.scraperQueue.getWaitingCount(),
+      this.scraperQueue.getActiveCount(),
+      this.scraperQueue.getCompletedCount(),
+      this.scraperQueue.getFailedCount(),
+    ]);
+    const companyUrlCount = await this.pg.getCompanyUrlsForCrawl()
+      .then(r => r.length)
+      .catch(() => 0);
+    return { waiting, active, completed, failed, companyUrlCount };
+  }
+
+  // ─── Scheduled recrawl ────────────────────────────────────────────────────
+
   /** Schedule daily recrawl */
   async scheduleRecrawl(): Promise<void> {
     const hours = parseInt(this.config.get('SCRAPER_RECRAWL_HOURS', '24'), 10);
-    const targetUrl = this.config.get<string>('SCRAPER_TARGET_URL', 'https://www.msx.om');
+    const targetUrl = this.config.get<string>('SCRAPER_TARGET_URL', MSX_BASE);
 
     await this.scraperQueue.add(
       CrawlJobType.RECRAWL,
@@ -49,15 +226,5 @@ export class ScraperService {
       },
     );
     this.logger.log(`⏰ Scheduled recrawl every ${hours} hours`);
-  }
-
-  async getQueueStats() {
-    const [waiting, active, completed, failed] = await Promise.all([
-      this.scraperQueue.getWaitingCount(),
-      this.scraperQueue.getActiveCount(),
-      this.scraperQueue.getCompletedCount(),
-      this.scraperQueue.getFailedCount(),
-    ]);
-    return { waiting, active, completed, failed };
   }
 }

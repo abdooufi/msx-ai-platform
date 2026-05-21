@@ -48,27 +48,29 @@ export class ChatService {
     // 1. Detect language
     const language = await this.llm.detectLanguage(dto.message);
 
-    // 2. Extract company symbol and fetch live market data (parallel with RAG)
-    const symbol = this.dynamicApi.extractSymbol(dto.message);
-    const [ragResult, liveData] = await Promise.all([
+    // 2. Resolve company symbol (static patterns + DB alias fallback) in parallel with RAG
+    const [ragResult, symbol] = await Promise.all([
       this.rag.retrieve(dto.message, language),
-      symbol
-        ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
-        : Promise.resolve(null),
+      this.dynamicApi.resolveSymbolWithDb(dto.message),
     ]);
     const { context, sources, hadResults } = ragResult;
+
+    // 3. Fetch live market data for the resolved symbol (sequential — needs symbol first)
+    const liveData = symbol
+      ? await this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
+      : null;
 
     if (liveData) {
       this.logger.log(`Live data injected for symbol: ${symbol}`);
     }
 
-    // 3. Build conversation history (last 10 turns for context window)
+    // 4. Build conversation history (last 10 turns for context window)
     const historyMessages: LlmMessage[] = (dto.history || [])
       .slice(-10)
       .filter(h => h.role && h.content)
       .map(h => ({ role: h.role as 'user' | 'assistant', content: h.content }));
 
-    // 4. Build system prompt with retrieved context and live data
+    // 5. Build system prompt with retrieved context and live data
     const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData);
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -96,7 +98,7 @@ export class ChatService {
       })}\n\n`,
     );
 
-    // 5. Stream LLM response
+    // 6. Stream LLM response
     let fullResponse = '';
     let tokensUsed = 0;
     let latencyMs = 0;
@@ -129,7 +131,7 @@ export class ChatService {
 
     latencyMs = latencyMs || (Date.now() - start);
 
-    // 6. Persist conversation
+    // 7. Persist conversation
     await this.persistMessage(sessionId, dto, {
       response: fullResponse,
       language,
@@ -138,7 +140,7 @@ export class ChatService {
       latencyMs,
     });
 
-    // 7. Analytics
+    // 8. Analytics
     await this.trackEvent({
       type: EventType.MESSAGE_SENT,
       sessionId,

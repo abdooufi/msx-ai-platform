@@ -92,9 +92,12 @@ export const listDocuments = (page = 1) => api.get(`/upload?page=${page}`)
 export const deleteDocument = (id: string) => api.delete(`/upload/${id}`)
 
 // ─── Training ─────────────────────────────────────────────────────
-export const startCrawl    = (url?: string) => api.post('/train/website', { url })
-export const crawlPage     = (url: string)  => api.post('/train/website/page', { url })
-export const getCrawlStatus = ()            => api.get('/train/website/status')
+export const startCrawl        = (url?: string) => api.post('/train/website', { url })
+export const crawlPage         = (url: string)  => api.post('/train/website/page', { url })
+export const getCrawlStatus    = ()             => api.get('/train/website/status')
+export const startSitemapCrawl = ()             => api.post('/train/website/sitemap')
+export const startCompanyCrawl = ()             => api.post('/train/website/companies')
+export const startAllCrawl     = (url?: string) => api.post('/train/website/all', { url })
 
 // ─── Settings ─────────────────────────────────────────────────────
 export const getSettings    = ()              => api.get('/admin/settings')

@@ -69,7 +69,10 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
   async getCompanies(page = 1, limit = 20, search?: string) {
     const offset = (page - 1) * limit;
     const where  = search
-      ? `WHERE symbol ILIKE $3 OR long_name_en ILIKE $3 OR short_name_en ILIKE $3`
+      ? `WHERE symbol ILIKE $3
+           OR long_name_en  ILIKE $3
+           OR short_name_en ILIKE $3
+           OR clone_name    ILIKE $3`
       : '';
     const params: any[] = [limit, offset, ...(search ? [`%${search}%`] : [])];
 
@@ -98,6 +101,8 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
       sector_id,
       market_id,
       status_id,
+      clone_name,
+      url,
     } = data;
 
     if (id) {
@@ -106,25 +111,79 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
          SET symbol=$1, long_name_ar=$2, long_name_en=$3,
              short_name_ar=$4, short_name_en=$5,
              type=$6, sector_id=$7, market_id=$8, status_id=$9,
+             clone_name=$10, url=$11,
              updated_at=NOW()
-         WHERE id=$10 RETURNING *`,
+         WHERE id=$12 RETURNING *`,
         [symbol, long_name_ar, long_name_en,
          short_name_ar, short_name_en,
-         type, sector_id, market_id, status_id, id],
+         type, sector_id, market_id, status_id,
+         clone_name ?? null, url ?? null,
+         id],
       );
     }
 
     return this.query(
       `INSERT INTO companies
          (id, symbol, long_name_ar, long_name_en, short_name_ar, short_name_en,
-          type, sector_id, market_id, status_id, created_at, updated_at)
+          type, sector_id, market_id, status_id, clone_name, url,
+          created_at, updated_at)
        VALUES
-         (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+         (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+          NOW(), NOW())
        RETURNING *`,
       [symbol, long_name_ar, long_name_en,
        short_name_ar, short_name_en,
-       type, sector_id, market_id, status_id],
+       type, sector_id, market_id, status_id,
+       clone_name ?? null, url ?? null],
     );
+  }
+
+  /** All companies that have a non-empty URL — used by the website crawler */
+  async getCompanyUrlsForCrawl(): Promise<{ symbol: string; url: string }[]> {
+    return this.query<{ symbol: string; url: string }>(
+      `SELECT symbol, url FROM companies
+       WHERE url IS NOT NULL AND url <> ''
+       ORDER BY symbol`,
+    );
+  }
+
+  /**
+   * Fuzzy company lookup by any name / alias — used as DB fallback
+   * when static symbol detection fails.
+   * Splits the query into non-trivial words and searches against
+   * clone_name, all name columns and symbol.
+   */
+  async findCompanyByAlias(message: string): Promise<string | null> {
+    const STOP = new Set([
+      'what','tell','show','give','me','the','is','of','for','about',
+      'does','has','have','price','stock','share','current','today',
+      'please','company','listed','data','info','information',
+      'مالية','سعر','شركة','معلومات','اليوم',
+    ]);
+
+    const words = message
+      .toLowerCase()
+      .replace(/[^\w\s؀-ۿ]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3 && !STOP.has(w));
+
+    if (!words.length) return null;
+
+    for (const word of words) {
+      const rows = await this.query<{ symbol: string }>(
+        `SELECT symbol FROM companies
+         WHERE clone_name    ILIKE $1
+            OR long_name_en  ILIKE $1
+            OR short_name_en ILIKE $1
+            OR long_name_ar  ILIKE $1
+            OR short_name_ar ILIKE $1
+            OR symbol        ILIKE $1
+         LIMIT 1`,
+        [`%${word}%`],
+      );
+      if (rows[0]?.symbol) return rows[0].symbol;
+    }
+    return null;
   }
 
   async deleteCompany(id: string) {

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   Building2, Search, RefreshCw, TrendingUp, TrendingDown,
   Newspaper, DollarSign, BarChart2, Users, AlertCircle,
-  ChevronLeft, ChevronRight, CheckCircle, XCircle,
+  ChevronLeft, ChevronRight, CheckCircle, XCircle, Globe,
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -533,11 +533,30 @@ export default function CompaniesPage() {
                     >
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-mono font-semibold text-blue-300">{sym}</span>
-                        {co.market_id && (
-                          <span className="text-xs text-gray-600">{co.market_id}</span>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          {co.market_id && (
+                            <span className="text-xs text-gray-600">{co.market_id}</span>
+                          )}
+                          {co.url && (
+                            <a
+                              href={co.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={e => e.stopPropagation()}
+                              className="text-gray-600 hover:text-blue-400 transition"
+                              title={co.url}
+                            >
+                              <Globe size={11} />
+                            </a>
+                          )}
+                        </div>
                       </div>
                       <p className="text-xs text-gray-400 truncate mt-0.5">{name}</p>
+                      {co.clone_name && (
+                        <p className="text-xs text-gray-600 truncate leading-tight">
+                          {co.clone_name}
+                        </p>
+                      )}
                     </button>
                   )
                 })}
