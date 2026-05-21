@@ -6,11 +6,11 @@ import { ChatbootPgService } from './chatboot-pg.service';
 
 // ─── Cache TTL by category (seconds) ─────────────────────────────────────────
 const CACHE_TTL: Record<string, number> = {
-  company:      5 * 60,    // 5 min  — snapshot changes often
-  trading:      1 * 60,    // 1 min  — real-time trades
+  company:      30,         // 30 s   — snapshot changes every tick
+  trading:      30,         // 30 s   — real-time trades
   news:         10 * 60,   // 10 min
   financial:    60 * 60,   // 1 hr
-  chart:        5 * 60,    // 5 min
+  chart:        30,         // 30 s   — intraday trades must be fresh
   governance:   86400,     // 1 day
   board:        86400,
   subsidiaries: 86400,
@@ -722,19 +722,27 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
 
     if (!arr.length) return '';
 
-    // Build rows sorted by time
+    // Build rows sorted by full datetime: Year → Month → Day → Hour → Minute
     const rows = arr
       .map(r => {
-        const h        = Number(r.Hour   ?? 0);
-        const min      = Number(r.Minute ?? 0);
-        const ltp      = parseFloat(r.LTP    ?? 0);
-        const shares   = parseInt(r.Volume  ?? r.Value ?? 0, 10);
+        const year   = Number(r.Year   ?? 2000);
+        const month  = Number(r.Month  ?? 1);
+        const day    = Number(r.Day    ?? 1);
+        const h      = Number(r.Hour   ?? 0);
+        const min    = Number(r.Minute ?? 0);
+        const ltp    = parseFloat(r.LTP    ?? 0);
+        const shares = parseInt(r.Volume  ?? r.Value ?? 0, 10);
         // Turnover is often 0 — fall back to LTP × shares
         const turnover = parseFloat(r.Turnover) > 0
           ? parseFloat(r.Turnover)
           : parseFloat((ltp * shares).toFixed(3));
-        const sortKey  = h * 60 + min;
-        const time     = `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
+        // Full numeric sort key: YYYYMMDDHHMI
+        const sortKey = year * 100_000_000
+                      + month *   1_000_000
+                      + day   *     10_000
+                      + h     *        100
+                      + min;
+        const time = `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
         return { time, ltp, shares, turnover, sortKey };
       })
       .filter(r => r.ltp > 0)

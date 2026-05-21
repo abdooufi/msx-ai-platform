@@ -144,6 +144,33 @@ export class ChatService {
       this.logger.log(`Live data injected for symbol: ${symbol}`);
     }
 
+    // 4b. Chart fast-path — bypass LLM entirely when we have real trade data.
+    //     Small LLMs refuse "draw chart" requests; we stream the formatted data directly.
+    if (symbol && this.isChartRequest(dto.message) && liveData?.includes('Intraday Chart')) {
+      const chartBlock = this.extractChartBlock(liveData);
+      if (chartBlock) {
+        if (!res.headersSent) {
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Connection', 'keep-alive');
+          res.setHeader('X-Accel-Buffering', 'no');
+          res.flushHeaders();
+        }
+        res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
+        // Stream word-by-word for a natural feel
+        for (const line of chartBlock.split('\n')) {
+          res.write(`data: ${JSON.stringify({ delta: line + '\n' })}\n\n`);
+        }
+        const latencyMs = Date.now() - start;
+        res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs, provider: 'direct' })}\n\n`);
+        res.end();
+        await this.persistMessage(sessionId, dto, {
+          response: chartBlock, language, sources: [], tokensUsed: 0, latencyMs,
+        });
+        return;
+      }
+    }
+
     // 5. Build conversation history (last 10 turns for context window)
     const historyMessages: LlmMessage[] = (dto.history || [])
       .slice(-10)
@@ -324,6 +351,23 @@ export class ChatService {
       .findOne({ sessionId })
       .select('-messages.sources') // lighter response for client
       .lean();
+  }
+
+  /** True when the user's message is a chart/graph request */
+  private isChartRequest(message: string): boolean {
+    return /\b(chart|graph|intraday|candlestick|رسم\s*بياني|مخطط|بياني)\b/i.test(message);
+  }
+
+  /**
+   * Pull the "Intraday Chart" section out of the liveData string that
+   * DynamicApiService produced so we can stream it directly.
+   */
+  private extractChartBlock(liveData: string): string | null {
+    const idx = liveData.indexOf('📈 Intraday Chart');
+    if (idx === -1) return null;
+    // Everything from the chart header to the end (or next section separator)
+    const section = liveData.slice(idx).split('\n\n🔹')[0].trim();
+    return section || null;
   }
 
   async getSuggestions(language: 'ar' | 'en' | 'mixed') {

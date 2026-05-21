@@ -79,23 +79,33 @@ function normalizeChartData(raw: any): TradePoint[] {
     : []
 
   return arr
-    .map((row: any, i: number) => {
+    .map((row: any) => {
       const price  = num(row.LTP ?? row.ltp ?? row.Price ?? row.price ?? 0)
-      // MSX: Volume = shares per tick; Value = same; Turnover often 0
       const shares = num(row.Volume ?? row.Value ?? row.volume ?? 0)
 
-      // Build time from Hour + Minute (real MSX field names)
-      const h = String(row.Hour   ?? 0).padStart(2, '0')
-      const m = String(row.Minute ?? 0).padStart(2, '0')
+      // Full sort key: Year → Month → Day → Hour → Minute
+      const year  = Number(row.Year   ?? 2000)
+      const month = Number(row.Month  ?? 1)
+      const day   = Number(row.Day    ?? 1)
+      const hNum  = Number(row.Hour   ?? 0)
+      const mNum  = Number(row.Minute ?? 0)
+      const sortKey = year * 100_000_000
+                    + month *  1_000_000
+                    + day   *     10_000
+                    + hNum  *        100
+                    + mNum
+
+      const h    = String(hNum).padStart(2, '0')
+      const m    = String(mNum).padStart(2, '0')
       const time = (row.Hour !== undefined || row.Minute !== undefined)
         ? `${h}:${m}`
-        : String(row.Time ?? row.TradeTime ?? row.DateTime ?? i)
+        : String(row.Time ?? row.TradeTime ?? row.DateTime ?? sortKey)
             .replace(/^.*T/, '').replace(/\.\d+.*$/, '')
 
-      return { time, price, volume: shares, raw: i }
+      return { time, price, volume: shares, raw: sortKey }
     })
     .filter(p => p.price > 0)
-    .sort((a, b) => a.raw - b.raw)   // preserve original order (already time-sorted by MSX)
+    .sort((a, b) => a.raw - b.raw)   // oldest → newest; last element = latest trade
 }
 
 /** Extract a readable value from the snapshot (backend may or may not apply FIELD_MAP) */
