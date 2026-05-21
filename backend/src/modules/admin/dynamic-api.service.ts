@@ -319,17 +319,23 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
   // ─── ASP.NET WebMethod unwrap ─────────────────────────────────────────────
 
   /**
-   * Unwrap {"d": "JSON_STRING"} format returned by all MSX.om WebMethod endpoints.
-   * If not in that format, return data as-is.
+   * Unwrap MSX.om ASP.NET WebMethod responses.
+   *
+   * The API returns one of two shapes:
+   *   { "d": "JSON_STRING" }   — WebMethod string-serialised response (old endpoints)
+   *   { "d": [ {...}, ... ] }  — WebMethod returning a pre-parsed array/object (most snapshot.aspx endpoints)
+   *
+   * In both cases we want the inner value.  We also handle the edge case
+   * where the response is already a plain array / object with no "d" wrapper.
    */
   unwrap(data: any): any {
-    if (data && typeof data === 'object' && typeof data.d === 'string') {
-      try {
-        const inner = JSON.parse(data.d);
-        return inner;
-      } catch {
-        return data.d; // return raw string if not parseable
+    if (data && typeof data === 'object' && 'd' in data) {
+      const d = data.d;
+      if (typeof d === 'string') {
+        try { return JSON.parse(d); } catch { return d; }
       }
+      // d is already parsed (array or nested object) — return it directly
+      return d;
     }
     return data;
   }
@@ -472,21 +478,25 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
   // ─── Get endpoints that match user message ────────────────────────────────
 
   async getMatchedEndpoints(message: string): Promise<any[]> {
+    let pool: any[] = [];
+
     try {
-      const all = await this.pg.getActiveApiEndpoints();
-      return all.filter(ep => {
-        const hasKeywords = (ep.keywords_en?.length || ep.keywords_ar?.length);
-        if (!hasKeywords) return false;
-        return this.matchKeywords(
-          message,
-          ep.keywords_en ?? [],
-          ep.keywords_ar ?? [],
-        );
-      });
+      const dbEndpoints = await this.pg.getActiveApiEndpoints();
+      pool = dbEndpoints.length ? dbEndpoints : DEFAULT_ENDPOINTS;
     } catch (err: any) {
-      this.logger.error(`Failed to load active endpoints: ${err.message}`);
-      return [];
+      this.logger.warn(`DB endpoint lookup failed, using defaults: ${err.message}`);
+      pool = DEFAULT_ENDPOINTS;
     }
+
+    return pool.filter(ep => {
+      const hasKeywords = (ep.keywords_en?.length || ep.keywords_ar?.length);
+      if (!hasKeywords) return false;
+      return this.matchKeywords(
+        message,
+        ep.keywords_en ?? [],
+        ep.keywords_ar ?? [],
+      );
+    });
   }
 
   // ─── Company symbol / query extraction ───────────────────────────────────
@@ -631,11 +641,15 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
     if (v === null || v === undefined) return null;
     if (typeof v === 'string') {
       const t = v.trim();
-      if (!t || t === '0' || t.includes('{Symbol}') || t.includes('{symbol}')) return null;
+      if (!t) return null;
+      if (t.includes('{Symbol}') || t.includes('{symbol}')) return null;
+      // Filter string representations of zero  ("0", "0.0", "0.00", "0,000" etc.)
+      const numericStr = t.replace(/,/g, '');
+      if (!isNaN(Number(numericStr)) && Number(numericStr) === 0) return null;
       return t;
     }
     if (typeof v === 'number') {
-      if (v === 0) return null;
+      if (v === 0 || !isFinite(v)) return null;
       return v;
     }
     return v;
