@@ -63,7 +63,7 @@ export interface DashboardStats {
   successRate: number
   feedback: { positive: number; negative: number }
   avgLatencyMs: number
-  ragStats: { qdrantVectors: number; mongoDocuments: number }
+  ragStats: { qdrantVectors: number; pgDocuments: number }
   langBreakdown: Record<string, number>
   dailyMessages: Array<{ _id: string; count: number }>
 }

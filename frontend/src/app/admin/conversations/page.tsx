@@ -6,7 +6,7 @@ import {
   X, RefreshCcw, ChevronLeft, ChevronRight,
   ThumbsUp, ThumbsDown, AlertCircle,
 } from 'lucide-react'
-import { getConvs } from '../../../lib/api'
+import { getConvs, getConvDetail } from '../../../lib/api'
 import { Conversation, Message } from '../../../types'
 import clsx from 'clsx'
 
@@ -21,7 +21,8 @@ export default function ConversationsPage() {
   const [pages, setPages]     = useState(1)
   const [lang, setLang]       = useState('')
   const [loading, setLoading] = useState(false)
-  const [selected, setSelected] = useState<Conversation | null>(null)
+  const [selected, setSelected]   = useState<Conversation | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
 
   const load = useCallback(async (p: number, l: string) => {
     setLoading(true)
@@ -105,7 +106,20 @@ export default function ConversationsPage() {
             ) : convs.map(c => (
               <tr
                 key={c._id}
-                onClick={() => setSelected(c)}
+                onClick={async () => {
+                  setSelected(c)          // open modal immediately with summary
+                  setDetailLoading(true)
+                  try {
+                    const res = await getConvDetail(c._id)
+                    const full = res.data
+                    // merge messages into the summary object
+                    setSelected(prev => prev ? {
+                      ...prev,
+                      messages: full.messages ?? [],
+                    } : null)
+                  } catch { /* keep modal open with summary */ }
+                  finally { setDetailLoading(false) }
+                }}
                 className="hover:bg-gray-800/50 cursor-pointer transition"
               >
                 <td className="px-5 py-3 font-mono text-xs text-blue-400">
@@ -164,7 +178,11 @@ export default function ConversationsPage() {
 
       {/* Detail modal */}
       {selected && (
-        <ConversationModal conv={selected} onClose={() => setSelected(null)} />
+        <ConversationModal
+          conv={selected}
+          loading={detailLoading}
+          onClose={() => { setSelected(null); setDetailLoading(false) }}
+        />
       )}
     </div>
   )
@@ -185,7 +203,7 @@ function LangBadge({ lang }: { lang?: string }) {
   )
 }
 
-function ConversationModal({ conv, onClose }: { conv: Conversation; onClose: () => void }) {
+function ConversationModal({ conv, loading, onClose }: { conv: Conversation; loading?: boolean; onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
@@ -223,7 +241,12 @@ function ConversationModal({ conv, onClose }: { conv: Conversation; onClose: () 
           className="flex-1 overflow-y-auto px-6 py-4 space-y-3"
           dir={conv.language === 'ar' ? 'rtl' : 'ltr'}
         >
-          {!conv.messages?.length ? (
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <RefreshCcw size={18} className="animate-spin text-blue-400 mr-2" />
+              <span className="text-sm text-gray-500">Loading messages…</span>
+            </div>
+          ) : !conv.messages?.length ? (
             <div className="text-center py-12 text-gray-600">No messages found</div>
           ) : conv.messages.map((m, i) => (
             <MessageBubble key={i} msg={m} />

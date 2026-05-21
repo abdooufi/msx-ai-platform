@@ -102,6 +102,7 @@ export async function* streamChat(
 export const getStats    = ()            => api.get('/admin/stats')
 export const getConvs    = (p = 1, lang?: string) =>
   api.get(`/admin/conversations?page=${p}${lang ? `&lang=${lang}` : ''}`)
+export const getConvDetail = (id: string) => api.get(`/admin/pg/conversations/${id}`)
 export const getFailed   = (p = 1)      => api.get(`/admin/failed?page=${p}`)
 export const getAnalytics = (days = 7)  => api.get(`/analytics?days=${days}`)
 

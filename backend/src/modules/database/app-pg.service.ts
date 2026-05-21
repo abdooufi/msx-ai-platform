@@ -40,6 +40,20 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
     } finally { client.release(); }
   }
 
+  /**
+   * Shallow snake_case → camelCase transform for PG rows.
+   * Also maps `id` → `_id` so frontend receives the same shape as MongoDB docs.
+   * Does NOT recurse into nested JSONB objects.
+   */
+  private static c(row: Record<string, any>): any {
+    return Object.entries(row).reduce((acc, [k, v]) => {
+      if (k === 'id') { acc['_id'] = v; return acc; }
+      const camel = k.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());
+      acc[camel] = v;
+      return acc;
+    }, {} as any);
+  }
+
   private async runMigrations() {
     // app_users
     await this.query(`
@@ -171,7 +185,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
   async findUserByEmail(email: string, withPassword = false): Promise<any | null> {
     const cols = withPassword ? '*' : 'id,email,name,role,is_active,last_login_at,preferences,created_at,updated_at';
     const rows = await this.query(`SELECT ${cols} FROM app_users WHERE email=$1 AND is_active=true`, [email.toLowerCase()]);
-    return rows[0] ?? null;
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async findUserById(id: string): Promise<any | null> {
@@ -179,7 +193,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       `SELECT id,email,name,role,is_active,last_login_at,preferences,created_at,updated_at FROM app_users WHERE id=$1`,
       [id],
     );
-    return rows[0] ?? null;
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async createUser(data: { email: string; password: string; name: string; role: string }) {
@@ -189,7 +203,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
        RETURNING id,email,name,role,is_active,created_at`,
       [data.email.toLowerCase(), hash, data.name, data.role],
     );
-    return rows[0];
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async updateUser(id: string, data: { name?: string; role?: string; isActive?: boolean }) {
@@ -205,7 +219,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
        RETURNING id,email,name,role,is_active,created_at,updated_at`,
       params,
     );
-    return rows[0] ?? null;
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async changeUserPassword(id: string, newPassword: string) {
@@ -216,7 +230,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
 
   async deleteUser(id: string) {
     const rows = await this.query(`DELETE FROM app_users WHERE id=$1 RETURNING id,email,name,role`, [id]);
-    return rows[0] ?? null;
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async listUsers(page = 1, limit = 20) {
@@ -229,7 +243,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       ),
       this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM app_users`),
     ]);
-    return { users, total: parseInt(countRow[0].count, 10), page, pages: Math.ceil(parseInt(countRow[0].count, 10) / limit) };
+    return { users: users.map(r => AppPgService.c(r)), total: parseInt(countRow[0].count, 10), page, pages: Math.ceil(parseInt(countRow[0].count, 10) / limit) };
   }
 
   async updateUserLastLogin(id: string) {
@@ -280,7 +294,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       ),
       this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM audit_logs ${where}`, params),
     ]);
-    return { logs, total: parseInt(countRow[0].count, 10), page, pages: Math.ceil(parseInt(countRow[0].count, 10) / limit) };
+    return { logs: logs.map(r => AppPgService.c(r)), total: parseInt(countRow[0].count, 10), page, pages: Math.ceil(parseInt(countRow[0].count, 10) / limit) };
   }
 
   async auditStats() {
@@ -359,7 +373,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
   async getDashboardStats() {
     const since30d = new Date(Date.now() - 30 * 24 * 3600_000);
     const [
-      convCount, msgCount, failedCount, avgLatRow, langRows, dailyRows,
+      convCount, msgCount, failedCount, avgLatRow, langRows, dailyRows, feedbackRow,
     ] = await Promise.all([
       this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM conversations`),
       this.query<{ count: string }>(
@@ -383,6 +397,13 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
          GROUP BY 1 ORDER BY 1`,
         [since30d],
       ),
+      this.query<{ positive: string; negative: string }>(
+        `SELECT
+           COUNT(*) FILTER (WHERE msg->>'feedback' = 'positive')::text AS positive,
+           COUNT(*) FILTER (WHERE msg->>'feedback' = 'negative')::text AS negative
+         FROM conversations, jsonb_array_elements(messages::jsonb) AS msg
+         WHERE msg->>'feedback' IS NOT NULL`,
+      ),
     ]);
 
     const total  = parseInt(msgCount[0].count, 10);
@@ -395,6 +416,10 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       avgLatencyMs: Math.round(parseFloat(avgLatRow[0]?.avg ?? '0')),
       langBreakdown: Object.fromEntries(langRows.map((r: any) => [r._id, r.count])),
       dailyMessages: dailyRows,
+      feedback: {
+        positive: parseInt(feedbackRow[0]?.positive ?? '0', 10),
+        negative: parseInt(feedbackRow[0]?.negative ?? '0', 10),
+      },
     };
   }
 
@@ -444,10 +469,12 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM conversations ${where}`, params),
     ]);
     return {
-      conversations: rows.map((c: any) => ({
-        ...c,
-        lastMessage: c.last_message?.content?.substring(0, 100),
-      })),
+      conversations: rows.map((row: any) => {
+        const mapped = AppPgService.c(row);
+        // lastMessage was mapped from last_message (JSONB object); replace with the content string
+        mapped.lastMessage = row.last_message?.content?.substring(0, 100);
+        return mapped;
+      }),
       total: parseInt(countRow[0].count, 10),
       page,
       pages: Math.ceil(parseInt(countRow[0].count, 10) / limit),
@@ -539,7 +566,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
         data.uploadedBy ?? null, JSON.stringify(data.tags ?? []), data.description ?? null,
       ],
     );
-    return rows[0];
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async listDocuments(page = 1, limit = 20) {
@@ -548,12 +575,12 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       this.query(`SELECT * FROM uploaded_documents ORDER BY created_at DESC LIMIT $1 OFFSET $2`, [limit, skip]),
       this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM uploaded_documents`),
     ]);
-    return { docs, total: parseInt(countRow[0].count, 10), page, pages: Math.ceil(parseInt(countRow[0].count, 10) / limit) };
+    return { docs: docs.map(r => AppPgService.c(r)), total: parseInt(countRow[0].count, 10), page, pages: Math.ceil(parseInt(countRow[0].count, 10) / limit) };
   }
 
   async getDocument(id: string) {
     const rows = await this.query(`SELECT * FROM uploaded_documents WHERE id=$1`, [id]);
-    return rows[0] ?? null;
+    return rows[0] ? AppPgService.c(rows[0]) : null;
   }
 
   async updateDocumentStatus(id: string, data: {

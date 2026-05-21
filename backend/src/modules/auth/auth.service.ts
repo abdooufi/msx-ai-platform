@@ -25,14 +25,14 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    await this.pg.updateUserLastLogin(user.id);
+    await this.pg.updateUserLastLogin(user._id);
 
-    const payload = { sub: user.id, email: user.email, role: user.role };
+    const payload = { sub: user._id, email: user.email, role: user.role };
     const token   = this.jwt.sign(payload);
 
     return {
       accessToken: token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+      user: { id: user._id, email: user.email, name: user.name, role: user.role },
     };
   }
 
@@ -67,8 +67,8 @@ export class AuthService {
       isActive: data.isActive,
     });
 
-    const after = { name: updated?.name, role: updated?.role, isActive: updated?.is_active };
-    const beforeSnapshot = { name: before.name, role: before.role, isActive: before.is_active };
+    const after = { name: updated?.name, role: updated?.role, isActive: updated?.isActive };
+    const beforeSnapshot = { name: before.name, role: before.role, isActive: before.isActive };
 
     return { user: updated, before: beforeSnapshot, after };
   }

@@ -28,7 +28,7 @@ export class DocumentsService {
 
     // Enqueue for async processing
     await this.docsQueue.add('process-document', {
-      docId:    doc.id,
+      docId:    doc._id,
       filePath: file.path,
       mimeType: file.mimetype,
       title:    file.originalname,
@@ -62,8 +62,8 @@ export class DocumentsService {
     await this.docsQueue.add('process-document', {
       docId:    id,
       filePath,
-      mimeType: doc.mime_type,
-      title:    doc.original_name,
+      mimeType: doc.mimeType,
+      title:    doc.originalName,
     });
 
     return { ok: true, docId: id };

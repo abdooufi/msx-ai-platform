@@ -351,7 +351,7 @@ CLAUDE_MODEL=claude-3-5-haiku-20241022`}
         {stats?.ragStats && (
           <div className="mt-4 grid grid-cols-2 gap-3">
             <StatBox label="Vectors indexed"     value={stats.ragStats.qdrantVectors?.toLocaleString() ?? '—'} color="blue" />
-            <StatBox label="Knowledge documents" value={stats.ragStats.mongoDocuments?.toLocaleString() ?? '—'} color="purple" />
+            <StatBox label="Knowledge documents" value={stats.ragStats.pgDocuments?.toLocaleString() ?? '—'} color="purple" />
           </div>
         )}
       </Section>

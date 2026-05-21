@@ -61,7 +61,7 @@ export default function AdminDashboard() {
         <StatCard icon={<AlertCircle size={18} />} label="Failed" value={stats.failed} color="red" />
         <StatCard icon={<TrendingUp size={18} />} label="Positive Feedback" value={stats.feedback?.positive} color="green" />
         <StatCard icon={<Database size={18} />} label="Vectors Indexed" value={stats.ragStats?.qdrantVectors} color="blue" />
-        <StatCard icon={<Globe size={18} />} label="KB Documents" value={stats.ragStats?.mongoDocuments} color="purple" />
+        <StatCard icon={<Globe size={18} />} label="KB Documents" value={stats.ragStats?.pgDocuments} color="purple" />
       </div>
 
       {/* ── Charts ────────────────────────────────────────────── */}
