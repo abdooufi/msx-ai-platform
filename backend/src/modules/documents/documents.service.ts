@@ -51,9 +51,32 @@ export class DocumentsService {
 
   async delete(id: string) {
     await this.docModel.findByIdAndDelete(id);
-    // Also remove from RAG
-    const { RagService } = await import('../rag/rag.service');
     return { ok: true };
+  }
+
+  /** Re-queue a failed or stuck document for re-processing */
+  async retry(id: string) {
+    const doc = await this.docModel.findById(id).lean();
+    if (!doc) throw new Error(`Document not found: ${id}`);
+
+    // Reset status to pending
+    await this.docModel.findByIdAndUpdate(id, {
+      status: 'pending',
+      chunksIndexed: 0,
+      $unset: { errorMessage: '', processedAt: '' },
+    });
+
+    const uploadsDir = process.env.UPLOADS_DIR || './uploads';
+    const filePath   = `${uploadsDir}/${(doc as any).filename}`;
+
+    await this.docsQueue.add('process-document', {
+      docId:    id,
+      filePath,
+      mimeType: (doc as any).mimeType,
+      title:    (doc as any).originalName,
+    });
+
+    return { ok: true, docId: id };
   }
 }
 

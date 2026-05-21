@@ -212,19 +212,67 @@ export class ScraperService {
 
   // ─── Scheduled recrawl ────────────────────────────────────────────────────
 
-  /** Schedule daily recrawl */
-  async scheduleRecrawl(): Promise<void> {
-    const hours = parseInt(this.config.get('SCRAPER_RECRAWL_HOURS', '24'), 10);
-    const targetUrl = this.config.get<string>('SCRAPER_TARGET_URL', MSX_BASE);
+  private readonly SCHEDULE_JOB_ID = 'recrawl-msx';
 
+  /** Get current repeatable schedule info, or null if none is active */
+  async getScheduleInfo(): Promise<{
+    active: boolean;
+    cron?: string;
+    nextRunAt?: string;
+    key?: string;
+  }> {
+    try {
+      const jobs = await this.scraperQueue.getRepeatableJobs();
+      const job  = jobs.find(j => j.id === this.SCHEDULE_JOB_ID || j.name === CrawlJobType.RECRAWL);
+      if (!job) return { active: false };
+      return {
+        active:    true,
+        cron:      job.cron,
+        nextRunAt: job.next ? new Date(job.next).toISOString() : undefined,
+        key:       job.key,
+      };
+    } catch {
+      return { active: false };
+    }
+  }
+
+  /** Remove any existing schedule */
+  async cancelSchedule(): Promise<void> {
+    const jobs = await this.scraperQueue.getRepeatableJobs().catch(() => []);
+    for (const job of jobs) {
+      if (job.id === this.SCHEDULE_JOB_ID || job.name === CrawlJobType.RECRAWL) {
+        await this.scraperQueue.removeRepeatableByKey(job.key).catch(() => {});
+        this.logger.log(`⏰ Recrawl schedule cancelled (key: ${job.key})`);
+      }
+    }
+  }
+
+  /**
+   * Set (or replace) the auto-recrawl schedule.
+   * @param cron  Standard 5-field cron expression, e.g. "0 2 * * *" (daily at 2 am)
+   */
+  async setSchedule(cron: string): Promise<{ active: boolean; cron: string; nextRunAt?: string }> {
+    await this.cancelSchedule();
+
+    const targetUrl = this.config.get<string>('SCRAPER_TARGET_URL', MSX_BASE);
     await this.scraperQueue.add(
       CrawlJobType.RECRAWL,
       { url: targetUrl },
       {
-        repeat: { cron: `0 */${hours} * * *` },
-        jobId: 'recrawl-msx',
+        repeat: { cron },
+        jobId:  this.SCHEDULE_JOB_ID,
       },
     );
-    this.logger.log(`⏰ Scheduled recrawl every ${hours} hours`);
+    this.logger.log(`⏰ Recrawl schedule set: "${cron}"`);
+
+    // Return fresh info so the caller can confirm next run time
+    const info = await this.getScheduleInfo();
+    return { active: true, cron, nextRunAt: info.nextRunAt };
+  }
+
+  /** Legacy helper kept for backward compat (called by old controller action) */
+  async scheduleRecrawl(): Promise<void> {
+    const hours = parseInt(this.config.get('SCRAPER_RECRAWL_HOURS', '24'), 10);
+    await this.setSchedule(`0 */${hours} * * *`);
   }
 }

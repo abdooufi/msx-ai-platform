@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -27,11 +27,29 @@ export class ScraperController {
     return this.scraper.crawlPage(body.url);
   }
 
+  @Get('schedule')
+  @ApiOperation({ summary: 'Get current auto-recrawl schedule' })
+  async getSchedule() {
+    return this.scraper.getScheduleInfo();
+  }
+
   @Post('schedule')
-  @ApiOperation({ summary: 'Schedule daily auto-recrawl' })
-  async schedule() {
-    await this.scraper.scheduleRecrawl();
-    return { ok: true, message: 'Recrawl scheduled' };
+  @ApiOperation({ summary: 'Set (or replace) the auto-recrawl cron schedule' })
+  @ApiBody({ schema: { properties: { cron: { type: 'string', example: '0 2 * * *' } } } })
+  async setSchedule(@Body() body: { cron: string }) {
+    if (!body?.cron) {
+      // No cron provided — fall back to legacy env-var schedule
+      await this.scraper.scheduleRecrawl();
+      return this.scraper.getScheduleInfo();
+    }
+    return this.scraper.setSchedule(body.cron);
+  }
+
+  @Delete('schedule')
+  @ApiOperation({ summary: 'Cancel the auto-recrawl schedule' })
+  async cancelSchedule() {
+    await this.scraper.cancelSchedule();
+    return { active: false };
   }
 
   @Get('status')

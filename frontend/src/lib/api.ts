@@ -118,6 +118,12 @@ export const getCrawlStatus    = ()             => api.get('/train/website/statu
 export const startSitemapCrawl = ()             => api.post('/train/website/sitemap')
 export const startCompanyCrawl = ()             => api.post('/train/website/companies')
 export const startAllCrawl     = (url?: string) => api.post('/train/website/all', { url })
+// Schedule management
+export const getCrawlSchedule    = ()             => api.get('/train/website/schedule')
+export const setCrawlSchedule    = (cron: string) => api.post('/train/website/schedule', { cron })
+export const cancelCrawlSchedule = ()             => api.delete('/train/website/schedule')
+// Document retry
+export const retryDocument = (id: string) => api.post(`/upload/${id}/retry`)
 
 // ─── Settings ─────────────────────────────────────────────────────
 export const getSettings    = ()              => api.get('/admin/settings')

@@ -34,6 +34,11 @@ export class DocumentsController {
     return this.docs.list(parseInt(page), parseInt(limit));
   }
 
+  @Post(':id/retry')
+  async retry(@Param('id') id: string) {
+    return this.docs.retry(id);
+  }
+
   @Delete(':id')
   async remove(@Param('id') id: string) {
     return this.docs.delete(id);
