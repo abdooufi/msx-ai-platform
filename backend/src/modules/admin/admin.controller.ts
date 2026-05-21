@@ -384,4 +384,63 @@ export class AdminController {
   clearSymbolCache(@Param('symbol') symbol: string) {
     return this.dynamicApi.clearCache(symbol).then(n => ({ cleared: n, symbol }));
   }
+
+  @Get('cache/stats')
+  @ApiOperation({ summary: 'Redis cache stats — key counts by category, TTL reference' })
+  getCacheStats() {
+    return this.dynamicApi.getCacheStats();
+  }
+
+  @Get('models')
+  @ApiOperation({ summary: 'List available AI models / provider info' })
+  getModels() {
+    return this.llm.getProviderInfo();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Company API routes — proxy to live MSX.om data
+  // ══════════════════════════════════════════════════════════════════════════
+
+  @Get('companies/snapshot/:symbol')
+  @ApiOperation({ summary: 'Live company snapshot (price, change, volume)' })
+  getCompanySnapshot(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Company Snapshot', symbol);
+  }
+
+  @Get('companies/news/:symbol')
+  @ApiOperation({ summary: 'Latest company news / announcements' })
+  getCompanyNews(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Company News', symbol);
+  }
+
+  @Get('companies/chart/:symbol')
+  @ApiOperation({ summary: 'Historical OHLCV chart data' })
+  @ApiQuery({ name: 'period', required: false })
+  getCompanyChart(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Chart Data 1 Month', symbol);
+  }
+
+  @Get('companies/dividends/:symbol')
+  @ApiOperation({ summary: 'Dividend distribution history' })
+  getCompanyDividends(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Dividend Distribution', symbol);
+  }
+
+  @Get('companies/financial/:symbol')
+  @ApiOperation({ summary: 'Financial statements (P&L, balance sheet)' })
+  getCompanyFinancial(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Financial Statements', symbol);
+  }
+
+  @Get('companies/board/:symbol')
+  @ApiOperation({ summary: 'Board of directors' })
+  getCompanyBoard(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Board of Directors', symbol);
+  }
+
+  @Get('companies/ownership/:symbol')
+  @ApiOperation({ summary: 'Ownership structure (Omani vs non-Omani)' })
+  getCompanyOwnership(@Param('symbol') symbol: string) {
+    return this.dynamicApi.getCompanyData('Ownership Structure', symbol);
+  }
 }

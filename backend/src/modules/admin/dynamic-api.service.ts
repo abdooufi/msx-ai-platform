@@ -19,28 +19,62 @@ const CACHE_TTL: Record<string, number> = {
   general:      5 * 60,
 };
 
-// ─── Human-readable field names for MSX snapshot format ──────────────────────
-const SNAPSHOT_FIELD_MAP: Record<string, string> = {
-  LTP:            'Last Price',
-  Change:         'Change',
-  PerChange:      'Change%',
-  Volume:         'Volume',
-  Value:          'Value (OMR)',
-  High:           'Day High',
-  Low:            'Day Low',
-  Open:           'Open',
-  PreviousClose:  'Previous Close',
-  NoOfTrades:     'No. of Trades',
-  MarketCap:      'Market Cap',
-  WeekHigh52:     '52-Week High',
-  WeekLow52:      '52-Week Low',
-  PE:             'P/E Ratio',
-  EPS:            'EPS',
-  Shares:         'Shares Outstanding',
-  CompanyName:    'Company',
-  Symbol:         'Symbol',
-  Sector:         'Sector',
+// ─── Exact field mapping from real MSX API response ──────────────────────────
+const FIELD_MAP: Record<string, string> = {
+  // Price
+  LTP:              'Last Price',
+  ClosePrice:       'Close Price',
+  OpenPrice:        'Open Price',
+  High:             'High',
+  Low:              'Low',
+  PrevClose:        'Previous Close',
+  // Change
+  Change:           'Change %',
+  ChangeVal:        'Change Value',
+  Image:            'Trend',
+  // Volume
+  Volume:           'Volume',
+  LTV:              'Last Trade Volume',
+  Turnover:         'Turnover',
+  NoOfTrades:       'No. of Trades',
+  // Bid/Ask
+  BidPrice:         'Bid Price',
+  BidVolume:        'Bid Volume',
+  AskPrice:         'Ask Price',
+  AskVolume:        'Ask Volume',
+  // Company identity
+  Symbol:           'Symbol',
+  ShortNameEn:      'Name (EN)',
+  ShortNameAr:      'Name (AR)',
+  LongNameEn:       'Full Name (EN)',
+  LongNameAr:       'Full Name (AR)',
+  GroupEn:          'Market Group',
+  GroupAr:          'Market Group (AR)',
+  MarketID:         'Market ID',
+  Type:             'Type',
+  // Ownership
+  NonOmani:         'Non-Omani Ownership %',
+  GCC:              'GCC Ownership %',
+  Arab:             'Arab Ownership %',
+  Foreign:          'Foreign Ownership %',
+  Omani:            'Omani Ownership %',
+  NonOmaniPct:      'Non-Omani %',
+  GCCPct:           'GCC %',
+  ArabPct:          'Arab %',
+  ForeignPct:       'Foreign %',
+  OmaniPct:         'Omani %',
+  // Status
+  QuarterStatusEn:  'Quarter Status',
 };
+
+const PRIORITY_FIELDS = [
+  'Last Price', 'Change %', 'Change Value', 'Trend',
+  'Open Price', 'High', 'Low', 'Previous Close',
+  'Volume', 'Turnover', 'No. of Trades', 'Last Trade Volume',
+  'Bid Price', 'Ask Price', 'Market Group',
+  'Non-Omani Ownership %', 'GCC Ownership %',
+  'Arab Ownership %', 'Foreign Ownership %', 'Omani Ownership %',
+];
 
 // ─── The 14 default MSX.om endpoints ─────────────────────────────────────────
 const BASE = 'https://www.msx.om';
@@ -361,6 +395,41 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
     return data;
   }
 
+  // ─── Cache stats ─────────────────────────────────────────────────────────
+
+  async getCacheStats(): Promise<{
+    connected: boolean;
+    totalKeys: number;
+    byCategory: Record<string, number>;
+    ttlReference: Record<string, number>;
+  }> {
+    const ttlReference = { ...CACHE_TTL };
+
+    if (!this.redis) {
+      return { connected: false, totalKeys: 0, byCategory: {}, ttlReference };
+    }
+
+    try {
+      const keys = await this.redis.keys('msx:*');
+      const byCategory: Record<string, number> = {};
+
+      for (const key of keys) {
+        // key format: msx:{endpointName}:{SYMBOL}
+        // use category from endpoint name heuristic
+        const parts = key.split(':');
+        const endpointName = parts[1] ?? 'unknown';
+        // Try to map back to category via endpoint name lookup in DEFAULT_ENDPOINTS
+        const ep = DEFAULT_ENDPOINTS.find(e => e.name === endpointName);
+        const cat = ep?.category ?? 'general';
+        byCategory[cat] = (byCategory[cat] ?? 0) + 1;
+      }
+
+      return { connected: true, totalKeys: keys.length, byCategory, ttlReference };
+    } catch {
+      return { connected: false, totalKeys: 0, byCategory: {}, ttlReference };
+    }
+  }
+
   // ─── Clear cache ──────────────────────────────────────────────────────────
 
   async clearCache(symbol?: string): Promise<number> {
@@ -420,34 +489,83 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // ─── Company symbol extraction ────────────────────────────────────────────
+  // ─── Company symbol / query extraction ───────────────────────────────────
 
   /**
-   * Extract the most likely stock symbol from a user message.
-   * Strategy:
-   *   1. Scan for known MSX symbols in the message
-   *   2. Regex for any uppercase ticker-like token (2–6 chars)
-   *   3. Try partial DB lookup if nothing found
+   * Port of Python detect_company_query():
+   * 1. MSX URL param (?s=SYMBOL)
+   * 2. Uppercase ticker standalone (3–6 chars, not in stopwords)
+   * 3. Trigger words → extract name after them
+   * 4. Arabic text pattern
    */
-  extractSymbol(message: string): string | null {
-    // Pass 1: known symbols
+  detectCompanyQuery(message: string): string | null {
+    // 1. MSX URL param
+    const urlMatch = message.match(/[?&]s=([A-Za-z0-9]+)/i);
+    if (urlMatch) return urlMatch[1].toUpperCase();
+
+    const STOPWORDS = new Set([
+      'WHAT','WHEN','WHERE','TELL','SHOW','GIVE','FROM','WITH',
+      'ABOUT','INFO','THIS','THAT','HAVE','DOES','WILL','YOUR',
+      'THEIR','HELP','NEED','WANT','PLEASE','THANK','HELLO','GOOD',
+      'LIST','MOST','LAST','NEXT','BEST','MORE','LESS','MANY','THE',
+      'SURE','JUST','SOME','MUCH','VERY','ALSO','ONLY','THEN','THAN',
+      'GET','POST','PUT','ARE','MSX','URL','API','AI','FOR',
+    ]);
+
+    // 2. Known symbols first
     const upper = message.toUpperCase();
     for (const sym of KNOWN_SYMBOLS) {
-      // whole-word check
-      const re = new RegExp(`\\b${sym}\\b`);
-      if (re.test(upper)) return sym;
+      if (new RegExp(`\\b${sym}\\b`).test(upper)) return sym;
     }
 
-    // Pass 2: generic uppercase-token regex in original message
-    const tokens = message.match(TICKER_RE) ?? [];
-    const filtered = tokens.filter(t =>
-      t.length >= 2 &&
-      t.length <= 6 &&
-      !['GET','POST','PUT','THE','AND','FOR','ARE','MSX','URL','API','AI'].includes(t),
+    // 3. Generic uppercase tickers (3–6 chars)
+    const tickers = message.match(/\b([A-Z]{3,6})\b/g) ?? [];
+    for (const t of tickers) {
+      if (!STOPWORDS.has(t)) return t;
+    }
+
+    // 4. Trigger-word extraction
+    const triggerMatch = message.match(
+      /(?:about|info(?:rmation)?|search|lookup|find|price(?:\s+of)?|stock(?:\s+of)?|shares?(?:\s+of)?|company|tell me about|what is|show me|details?|explain|news(?:\s+of)?|dividend(?:\s+of)?|financial(?:\s+of)?|chart(?:\s+of)?|trade(?:\s+of)?|أخبار|سعر|شركة|معلومات|توزيعات|مالية|تداول|رسم)\s+(?:of\s+|for\s+|about\s+)?(.+?)(?:\?|$)/i,
     );
-    if (filtered.length) return filtered[0];
+    if (triggerMatch) {
+      let raw = triggerMatch[1].trim().replace(/^(?:of|for|about|the|on)\s+/i, '').trim();
+      if (/^[A-Z]{3,6}$/.test(raw)) return raw;
+      if (raw) return raw;
+    }
+
+    // 5. Arabic text pattern
+    const arMatch = message.match(/[؀-ۿ\s]{3,}/);
+    if (arMatch) return arMatch[0].trim();
 
     return null;
+  }
+
+  /** Alias kept for backward compat in ChatService */
+  extractSymbol(message: string): string | null {
+    return this.detectCompanyQuery(message);
+  }
+
+  // ─── Time period detection ────────────────────────────────────────────────
+
+  /** Detect historical-price duration from message: D/W/M/Y */
+  detectDuration(message: string): 'D' | 'W' | 'M' | 'Y' {
+    const m = message.toLowerCase();
+    if (/daily|today|\bday\b|يومي/.test(m))     return 'D';
+    if (/weekly|\bweek\b|أسبوعي/.test(m))        return 'W';
+    if (/yearly|\byear\b|annual|سنوي/.test(m))   return 'Y';
+    return 'M';
+  }
+
+  /** Detect chart period from message: 1w/1m/3m/6m/1y/5y */
+  detectChartPeriod(message: string): '1w' | '1m' | '3m' | '6m' | '1y' | '5y' {
+    const m = message.toLowerCase();
+    if (/week|1w|7\s*day/.test(m))              return '1w';
+    if (/3\s*month|3m|quarter/.test(m))         return '3m';
+    if (/6\s*month|6m|half/.test(m))            return '6m';
+    if (/\byear\b|1y|12\s*month/.test(m))       return '1y';
+    if (/5\s*year|5y/.test(m))                  return '5y';
+    return '1m';
   }
 
   // ─── Fetch and format live data for AI context ────────────────────────────
@@ -468,8 +586,8 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
 
         const isSnapshot = ep.category === 'company' || ep.name.toLowerCase().includes('snapshot');
         const formatted = isSnapshot
-          ? this.formatSnapshotForAi(data)
-          : this.flattenAny(data);
+          ? this.formatSnapshotForAi(symbol, data)
+          : this.flattenAny(data).join('\n');
 
         return formatted ? `🔹 ${ep.name}:\n${formatted}` : null;
       }),
@@ -485,67 +603,141 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
   // ─── Formatters ───────────────────────────────────────────────────────────
 
   /**
-   * Format MSX company snapshot using human-readable field names.
-   * Input is the parsed inner object from the WebMethod response.
+   * Returns null for blank / zero / template placeholder values.
+   * Port of Python _clean() in msx_parser.py.
    */
-  private formatSnapshotForAi(data: any): string {
-    if (!data || typeof data !== 'object') return String(data ?? '');
+  cleanValue(v: any): any {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'string') {
+      const t = v.trim();
+      if (!t || t === '0' || t.includes('{Symbol}') || t.includes('{symbol}')) return null;
+      return t;
+    }
+    if (typeof v === 'number') {
+      if (v === 0) return null;
+      return v;
+    }
+    return v;
+  }
 
-    // The snapshot might be an object or an array of one object
-    const obj: Record<string, any> = Array.isArray(data) ? data[0] : data;
-    if (!obj) return '';
+  /**
+   * Map raw API keys to human-readable labels (port of parse_company_snapshot()).
+   * Returns a flat Record with clean values only.
+   */
+  parseCompanySnapshot(data: any): Record<string, any> {
+    const obj: Record<string, any> = Array.isArray(data) ? (data[0] ?? {}) : (data ?? {});
+    const result: Record<string, any> = {};
+
+    for (const [k, v] of Object.entries(obj)) {
+      const clean = this.cleanValue(v);
+      if (clean === null) continue;
+      const label = FIELD_MAP[k] ?? k;
+      result[label] = clean;
+    }
+    return result;
+  }
+
+  /**
+   * Format MSX company snapshot using human-readable field names,
+   * with priority fields shown first. Port of format_snapshot_for_ai().
+   */
+  formatSnapshotForAi(symbol: string, data: any): string {
+    const mapped = this.parseCompanySnapshot(data);
+    if (!Object.keys(mapped).length) return '';
 
     const lines: string[] = [];
-    for (const [raw, value] of Object.entries(obj)) {
-      if (value === null || value === undefined || value === '' || value === '0') continue;
-      const label = SNAPSHOT_FIELD_MAP[raw] ?? raw;
-      lines.push(`  ${label}: ${value}`);
+    lines.push(`📊 Live Market Data: ${symbol.toUpperCase()}`);
+
+    // Priority fields first
+    for (const label of PRIORITY_FIELDS) {
+      if (label in mapped) {
+        lines.push(`  ${label}: ${mapped[label]}`);
+      }
     }
+
+    // Remaining fields not in priority list
+    for (const [label, value] of Object.entries(mapped)) {
+      if (!PRIORITY_FIELDS.includes(label)) {
+        lines.push(`  ${label}: ${value}`);
+      }
+    }
+
     return lines.join('\n');
   }
 
   /**
    * Generic recursive flattener — handles any JSON shape.
+   * Returns an array of bullet-point strings (port of flatten_any()).
    * Used for non-snapshot endpoints.
    */
-  flattenAny(data: any, depth = 0, maxItems = 25): string {
-    if (data === null || data === undefined) return '';
-    if (typeof data === 'boolean') return String(data);
+  flattenAny(data: any, prefix = '', depth = 0): string[] {
+    if (depth > 4) return [];
+    if (data === null || data === undefined) return [];
 
-    if (typeof data === 'string') {
-      const trimmed = data.trim();
-      if (!trimmed || trimmed === '0' || trimmed.includes('{Symbol}')) return '';
-      return trimmed;
+    if (typeof data === 'string' || typeof data === 'number' || typeof data === 'boolean') {
+      const clean = this.cleanValue(data);
+      if (clean === null) return [];
+      const line = prefix ? `${prefix}: ${clean}` : String(clean);
+      return [line];
     }
 
-    if (typeof data === 'number') return String(data);
-    if (depth > 3) return '…';
-
     if (Array.isArray(data)) {
-      const items = data.slice(0, maxItems);
-      const lines = items
-        .map(item => {
-          const line = this.flattenAny(item, depth + 1);
-          return line ? `  • ${line}` : null;
-        })
-        .filter(Boolean);
-      if (data.length > maxItems) lines.push(`  … and ${data.length - maxItems} more`);
-      return lines.join('\n');
+      const lines: string[] = [];
+      const items = data.slice(0, 25);
+      for (let i = 0; i < items.length; i++) {
+        const sub = this.flattenAny(
+          items[i],
+          prefix ? `${prefix}[${i + 1}]` : `Item ${i + 1}`,
+          depth + 1,
+        );
+        lines.push(...sub.map(l => `  ${l}`));
+      }
+      if (data.length > 25) lines.push(`  … and ${data.length - 25} more`);
+      return lines;
     }
 
     if (typeof data === 'object') {
       const lines: string[] = [];
       let count = 0;
       for (const [k, v] of Object.entries(data)) {
-        if (count >= maxItems) { lines.push('  …'); break; }
-        if (v === null || v === undefined || v === '' || v === 0 || v === '0') continue;
-        const val = this.flattenAny(v, depth + 1);
-        if (val) { lines.push(`  ${k}: ${val}`); count++; }
+        if (count >= 30) { lines.push('  …'); break; }
+        const label = FIELD_MAP[k] ?? k;
+        const sub = this.flattenAny(v, prefix ? `${prefix} > ${label}` : label, depth + 1);
+        if (sub.length) { lines.push(...sub); count++; }
       }
-      return lines.join('\n');
+      return lines;
     }
 
-    return '';
+    return [];
+  }
+
+  // ─── Company data by category ────────────────────────────────────────────
+
+  /**
+   * Fetch data from the first active endpoint matching a given name or category.
+   * Used by company API routes.
+   */
+  async getCompanyData(
+    nameOrCategory: string,
+    symbol: string,
+    byCategory = false,
+  ): Promise<any> {
+    let ep: any = null;
+    if (byCategory) {
+      const all = await this.pg.getActiveApiEndpoints();
+      ep = all.find(e => e.category === nameOrCategory);
+    } else {
+      ep = await this.pg.getApiEndpointByName(nameOrCategory);
+    }
+    if (!ep) {
+      // fallback to DEFAULT_ENDPOINTS
+      const def = byCategory
+        ? DEFAULT_ENDPOINTS.find(e => e.category === nameOrCategory)
+        : DEFAULT_ENDPOINTS.find(e => e.name === nameOrCategory);
+      if (!def) throw new Error(`No endpoint found for: ${nameOrCategory}`);
+      ep = def;
+    }
+    return this.callEndpoint(ep, symbol);
   }
 
   // ─── Test endpoint (admin) ────────────────────────────────────────────────

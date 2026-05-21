@@ -583,6 +583,12 @@ function FaqsPanel() {
 
 // ─── Companies Panel ──────────────────────────────────────────────────────────
 
+const EMPTY_COMPANY = {
+  symbol: '', long_name_en: '', long_name_ar: '',
+  short_name_en: '', short_name_ar: '',
+  type: '', sector_id: '', market_id: '', status_id: '',
+}
+
 function CompaniesPanel() {
   const [rows, setRows] = useState<any[]>([])
   const [total, setTotal] = useState(0)
@@ -628,12 +634,13 @@ function CompaniesPanel() {
         <form onSubmit={e => { e.preventDefault(); setPage(1); load(1, search) }} className="flex-1 flex gap-2">
           <div className="relative flex-1">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search companies…"
+            <input value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Search by symbol or name…"
               className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-teal-500" />
           </div>
           <button type="submit" className="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-lg text-sm">Search</button>
         </form>
-        <button onClick={() => setEditing({ name: '', symbol: '', description: '', sector: '', website: '' })}
+        <button onClick={() => setEditing({ ...EMPTY_COMPANY })}
           className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-medium">
           <Plus size={14} /> Add
         </button>
@@ -646,31 +653,41 @@ function CompaniesPanel() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Name</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Symbol</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Sector</th>
-                <th className="text-left px-4 py-3 text-gray-400 font-medium">Website</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium w-24">Symbol</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium">Name (EN)</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium">Name (AR)</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium">Type</th>
+                <th className="text-left px-4 py-3 text-gray-400 font-medium">Market</th>
                 <th className="px-4 py-3 w-20" />
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
               {rows.map(row => (
                 <tr key={row.id} className="hover:bg-white/5 transition-colors">
-                  <td className="px-4 py-3 text-white font-medium">{row.name}</td>
-                  <td className="px-4 py-3"><span className="text-xs font-mono bg-teal-500/10 text-teal-300 px-2 py-0.5 rounded">{row.symbol}</span></td>
-                  <td className="px-4 py-3 text-gray-400 text-xs">{row.sector}</td>
-                  <td className="px-4 py-3 text-xs">
-                    {row.website && <a href={row.website} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline flex items-center gap-1"><Globe size={11} />{row.website.replace(/^https?:\/\//, '')}</a>}
+                  <td className="px-4 py-3">
+                    <span className="text-xs font-mono bg-teal-500/10 text-teal-300 px-2 py-0.5 rounded">
+                      {row.symbol || '—'}
+                    </span>
                   </td>
+                  <td className="px-4 py-3 text-white font-medium max-w-[200px] truncate">
+                    {row.long_name_en || row.short_name_en || '—'}
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 text-xs max-w-[180px] truncate text-right" dir="rtl">
+                    {row.long_name_ar || row.short_name_ar || '—'}
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 text-xs">{row.type || '—'}</td>
+                  <td className="px-4 py-3 text-gray-400 text-xs">{row.market_id || '—'}</td>
                   <td className="px-4 py-3">
                     <div className="flex gap-2 justify-center">
-                      <button onClick={() => setEditing({ ...row })} className="text-blue-400 hover:text-blue-300"><Pencil size={14} /></button>
+                      <button onClick={() => setEditing({ ...EMPTY_COMPANY, ...row })} className="text-blue-400 hover:text-blue-300"><Pencil size={14} /></button>
                       <button onClick={() => handleDelete(row.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
                     </div>
                   </td>
                 </tr>
               ))}
-              {!rows.length && <tr><td colSpan={5} className="text-center text-gray-500 py-8">No companies found</td></tr>}
+              {!rows.length && (
+                <tr><td colSpan={6} className="text-center text-gray-500 py-8">No companies found</td></tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -680,41 +697,119 @@ function CompaniesPanel() {
         <div className="flex items-center justify-between text-sm text-gray-400">
           <span>{total.toLocaleString()} companies</span>
           <div className="flex gap-2">
-            <button onClick={() => { const p = Math.max(1, page - 1); setPage(p); load(p, search) }} disabled={page <= 1} className="p-1 disabled:opacity-40 hover:text-white"><ChevronLeft size={16} /></button>
+            <button onClick={() => { const p = Math.max(1, page - 1); setPage(p); load(p, search) }}
+              disabled={page <= 1} className="p-1 disabled:opacity-40 hover:text-white"><ChevronLeft size={16} /></button>
             <span className="text-white">Page {page} / {pages}</span>
-            <button onClick={() => { const p = Math.min(pages, page + 1); setPage(p); load(p, search) }} disabled={page >= pages} className="p-1 disabled:opacity-40 hover:text-white"><ChevronRight size={16} /></button>
+            <button onClick={() => { const p = Math.min(pages, page + 1); setPage(p); load(p, search) }}
+              disabled={page >= pages} className="p-1 disabled:opacity-40 hover:text-white"><ChevronRight size={16} /></button>
           </div>
         </div>
       )}
 
+      {/* Edit / Create Modal */}
       {editing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-gray-900 border border-white/10 rounded-2xl w-full max-w-xl shadow-2xl">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+          <div className="bg-gray-900 border border-white/10 rounded-2xl w-full max-w-2xl shadow-2xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 flex-shrink-0">
               <h3 className="font-semibold text-white">{editing.id ? 'Edit Company' : 'New Company'}</h3>
               <button onClick={() => setEditing(null)} className="text-gray-400 hover:text-white"><X size={18} /></button>
             </div>
-            <div className="p-6 grid grid-cols-2 gap-4">
-              {[
-                { k: 'name',        label: 'Company Name *', col: 2 },
-                { k: 'symbol',      label: 'Ticker Symbol', col: 1 },
-                { k: 'sector',      label: 'Sector', col: 1 },
-                { k: 'website',     label: 'Website URL', col: 2 },
-                { k: 'founded',     label: 'Founded Year', col: 1 },
-              ].map(({ k, label, col }) => (
-                <div key={k} className={col === 2 ? 'col-span-2' : ''}>
-                  <label className="block text-xs text-gray-400 mb-1">{label}</label>
-                  <input value={(editing as any)[k] || ''} onChange={e => setEditing({ ...editing, [k]: e.target.value })}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500" />
+
+            <div className="overflow-y-auto flex-1 p-6 space-y-4">
+              {/* Row 1: Symbol + Type */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Ticker Symbol *</label>
+                  <input
+                    value={editing.symbol || ''}
+                    onChange={e => setEditing({ ...editing, symbol: e.target.value.toUpperCase() })}
+                    placeholder="e.g. OQEP"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase focus:outline-none focus:border-teal-500"
+                  />
                 </div>
-              ))}
-              <div className="col-span-2">
-                <label className="block text-xs text-gray-400 mb-1">Description</label>
-                <textarea rows={4} value={editing.description || ''} onChange={e => setEditing({ ...editing, description: e.target.value })}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500 resize-none" />
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Type</label>
+                  <input
+                    value={editing.type || ''}
+                    onChange={e => setEditing({ ...editing, type: e.target.value })}
+                    placeholder="e.g. Equity, ETF"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+              </div>
+
+              {/* Row 2: Long names */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Full Name (English)</label>
+                  <input
+                    value={editing.long_name_en || ''}
+                    onChange={e => setEditing({ ...editing, long_name_en: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1 text-right w-full">الاسم الكامل (عربي)</label>
+                  <input
+                    dir="rtl"
+                    value={editing.long_name_ar || ''}
+                    onChange={e => setEditing({ ...editing, long_name_ar: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white text-right focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+              </div>
+
+              {/* Row 3: Short names */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Short Name (English)</label>
+                  <input
+                    value={editing.short_name_en || ''}
+                    onChange={e => setEditing({ ...editing, short_name_en: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1 text-right w-full">الاسم المختصر (عربي)</label>
+                  <input
+                    dir="rtl"
+                    value={editing.short_name_ar || ''}
+                    onChange={e => setEditing({ ...editing, short_name_ar: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white text-right focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+              </div>
+
+              {/* Row 4: IDs */}
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Sector ID</label>
+                  <input
+                    value={editing.sector_id || ''}
+                    onChange={e => setEditing({ ...editing, sector_id: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Market ID</label>
+                  <input
+                    value={editing.market_id || ''}
+                    onChange={e => setEditing({ ...editing, market_id: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Status ID</label>
+                  <input
+                    value={editing.status_id || ''}
+                    onChange={e => setEditing({ ...editing, status_id: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-teal-500"
+                  />
+                </div>
               </div>
             </div>
-            <div className="flex justify-end gap-3 px-6 py-4 border-t border-white/10">
+
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-white/10 flex-shrink-0">
               <button onClick={() => setEditing(null)} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Cancel</button>
               <button onClick={handleSave} disabled={saving}
                 className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium">

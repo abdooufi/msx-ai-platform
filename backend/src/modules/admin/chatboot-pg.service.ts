@@ -68,7 +68,9 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   async getCompanies(page = 1, limit = 20, search?: string) {
     const offset = (page - 1) * limit;
-    const where  = search ? `WHERE symbol ILIKE $3 OR name ILIKE $3` : '';
+    const where  = search
+      ? `WHERE symbol ILIKE $3 OR long_name_en ILIKE $3 OR short_name_en ILIKE $3`
+      : '';
     const params: any[] = [limit, offset, ...(search ? [`%${search}%`] : [])];
 
     const [rows, countRow] = await Promise.all([
@@ -86,20 +88,42 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   async upsertCompany(data: any) {
     const {
-      id, symbol, name, description, sector, website, founded, employees,
+      id,
+      symbol,
+      long_name_ar,
+      long_name_en,
+      short_name_ar,
+      short_name_en,
+      type,
+      sector_id,
+      market_id,
+      status_id,
     } = data;
+
     if (id) {
       return this.query(
-        `UPDATE companies SET symbol=$1,name=$2,description=$3,sector=$4,
-         website=$5,founded=$6,employees=$7,updated_at=NOW()
-         WHERE id=$8 RETURNING *`,
-        [symbol, name, description, sector, website, founded, employees, id],
+        `UPDATE companies
+         SET symbol=$1, long_name_ar=$2, long_name_en=$3,
+             short_name_ar=$4, short_name_en=$5,
+             type=$6, sector_id=$7, market_id=$8, status_id=$9,
+             updated_at=NOW()
+         WHERE id=$10 RETURNING *`,
+        [symbol, long_name_ar, long_name_en,
+         short_name_ar, short_name_en,
+         type, sector_id, market_id, status_id, id],
       );
     }
+
     return this.query(
-      `INSERT INTO companies (id,symbol,name,description,sector,website,founded,employees,created_at,updated_at)
-       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,NOW(),NOW()) RETURNING *`,
-      [symbol, name, description, sector, website, founded, employees],
+      `INSERT INTO companies
+         (id, symbol, long_name_ar, long_name_en, short_name_ar, short_name_en,
+          type, sector_id, market_id, status_id, created_at, updated_at)
+       VALUES
+         (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+       RETURNING *`,
+      [symbol, long_name_ar, long_name_en,
+       short_name_ar, short_name_en,
+       type, sector_id, market_id, status_id],
     );
   }
 

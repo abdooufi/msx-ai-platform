@@ -163,3 +163,17 @@ export const updatePgUnanswered = (id: string, body: object) =>
   api.patch(`/admin/pg/unanswered-questions/${id}`, body)
 export const deletePgUnanswered = (id: string) =>
   api.delete(`/admin/pg/unanswered-questions/${id}`)
+
+// ─── Cache Stats ──────────────────────────────────────────────────
+export const getCacheStats = () => api.get('/admin/cache/stats')
+export const getModels     = () => api.get('/admin/models')
+
+// ─── Company Live Data ────────────────────────────────────────────
+export const getCompanySnapshot  = (symbol: string) => api.get(`/admin/companies/snapshot/${symbol}`)
+export const getCompanyNews      = (symbol: string) => api.get(`/admin/companies/news/${symbol}`)
+export const getCompanyChart     = (symbol: string, period = '1m') =>
+  api.get(`/admin/companies/chart/${symbol}?period=${period}`)
+export const getCompanyDividends = (symbol: string) => api.get(`/admin/companies/dividends/${symbol}`)
+export const getCompanyFinancial = (symbol: string) => api.get(`/admin/companies/financial/${symbol}`)
+export const getCompanyBoard     = (symbol: string) => api.get(`/admin/companies/board/${symbol}`)
+export const getCompanyOwnership = (symbol: string) => api.get(`/admin/companies/ownership/${symbol}`)
