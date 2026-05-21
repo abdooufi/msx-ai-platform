@@ -147,24 +147,33 @@ function DividendsList({ data }: { data: any[] }) {
 
 function BoardList({ data }: { data: any[] }) {
   if (!data?.length) return <p className="text-gray-500 text-sm">No board data available</p>
+
+  // Normalise: backend returns { role, nameEn, nameAr } from getBoardMembers()
+  // Legacy shape: { NameEn, RoleEn } — handle both
+  const members = data.map((m: any) => ({
+    role:   m.role   ?? m.RoleEn   ?? m.Role   ?? m.Position ?? '',
+    nameEn: m.nameEn ?? m.NameEn   ?? m.Name   ?? m.name     ?? '',
+    nameAr: m.nameAr ?? m.NameAr   ?? '',
+  })).filter(m => m.nameEn || m.nameAr)
+
+  if (!members.length) return <p className="text-gray-500 text-sm">No board data available</p>
+
   return (
     <div className="space-y-2">
-      {data.slice(0, 20).map((member, i) => (
+      {members.map((member, i) => (
         <div key={i} className="flex items-center gap-3 bg-gray-800 rounded-lg px-4 py-3">
-          <div className="w-8 h-8 rounded-full bg-blue-800 flex items-center justify-center text-sm font-bold text-blue-300">
-            {String(member.NameEn ?? member.Name ?? member.name ?? '?')[0]?.toUpperCase()}
+          <div className="w-8 h-8 rounded-full bg-blue-800 flex items-center justify-center text-sm font-bold text-blue-300 flex-shrink-0">
+            {(member.nameEn || member.nameAr || '?')[0]?.toUpperCase()}
           </div>
-          <div>
-            <p className="text-sm text-white font-medium">
-              {member.NameEn ?? member.Name ?? member.name}
-            </p>
-            <p className="text-xs text-gray-500">
-              {member.RoleEn ?? member.Role ?? member.role ?? member.Position}
-            </p>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-white font-medium truncate">{member.nameEn || '—'}</p>
+            {member.nameAr && (
+              <p className="text-xs text-gray-400 truncate" dir="rtl">{member.nameAr}</p>
+            )}
           </div>
-          {(member.Type ?? member.MemberType) && (
-            <span className="ml-auto text-xs text-gray-500 bg-gray-700 px-2 py-0.5 rounded">
-              {member.Type ?? member.MemberType}
+          {member.role && (
+            <span className="ml-auto text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded whitespace-nowrap flex-shrink-0">
+              {member.role}
             </span>
           )}
         </div>
@@ -187,12 +196,25 @@ function ChartPanel({ symbol }: { symbol: string }) {
     try {
       const r = await getCompanyChart(symbol, period)
       const raw = Array.isArray(r.data) ? r.data : (r.data?.data ?? [])
-      // Normalize: we expect {date/Date, close/Close/LTP, ...}
-      const normalized = raw.map((item: any) => ({
-        date: item.Date ?? item.date ?? item.TradeDate,
-        price: parseFloat(item.Close ?? item.close ?? item.LTP ?? item.ClosePrice ?? 0),
-        volume: parseInt(item.Volume ?? item.volume ?? 0, 10),
-      })).filter((d: any) => d.date && !isNaN(d.price) && d.price > 0)
+      // Normalize:
+      //  New format (company-chart-data.aspx): { Year, Month, Day, Hour, Minute, LTP, Volume, Turnover }
+      //  Legacy format (CompanyChartData):      { Date/TradeDate, Close/LTP, Volume }
+      const normalized = raw.map((item: any) => {
+        // Construct date string when Date field is null (new endpoint)
+        let date: string | null = item.Date ?? item.TradeDate ?? item.date ?? null
+        if (!date && item.Year) {
+          const mo  = String(item.Month  ?? 1).padStart(2, '0')
+          const dy  = String(item.Day    ?? 1).padStart(2, '0')
+          const hr  = String(item.Hour   ?? 0).padStart(2, '0')
+          const mn  = String(item.Minute ?? 0).padStart(2, '0')
+          date = `${item.Year}-${mo}-${dy} ${hr}:${mn}`
+        }
+        return {
+          date,
+          price: parseFloat(item.LTP ?? item.Close ?? item.close ?? item.ClosePrice ?? 0),
+          volume: parseInt(item.Volume ?? item.volume ?? 0, 10),
+        }
+      }).filter((d: any) => d.date && !isNaN(d.price) && d.price > 0)
       setData(normalized)
     } catch (e: any) {
       setError(e?.response?.data?.message ?? e.message ?? 'Failed to load chart')
@@ -262,7 +284,14 @@ function ChartPanel({ symbol }: { symbol: string }) {
               <XAxis
                 dataKey="date"
                 tick={{ fontSize: 10, fill: '#6b7280' }}
-                tickFormatter={(v: string) => v?.slice(0, 5) ?? ''}
+                tickFormatter={(v: string) => {
+                  if (!v) return ''
+                  // "2026-05-21 10:00" → "10:00"  (intraday)
+                  // "2026-05-21"       → "05-21"  (daily)
+                  const timeMatch = v.match(/\d{2}:\d{2}/)
+                  if (timeMatch) return timeMatch[0]
+                  return v.slice(5, 10)  // MM-DD
+                }}
                 interval="preserveStartEnd"
               />
               <YAxis
@@ -318,30 +347,36 @@ function OverviewPanel({ symbol }: { symbol: string }) {
   if (error) return <ErrorBlock msg={error} />
   if (!snapshot) return <p className="text-gray-500 text-sm py-8">No snapshot data</p>
 
-  // Key price fields
+  // Key price fields — LTP is the live last-trade price
   const priceFields: Record<string, any> = {}
   const PRICE_LABELS: Record<string, string> = {
-    LTP: 'Last Price', ClosePrice: 'Close', OpenPrice: 'Open',
+    LTP: 'Current Price (LTP)', ClosePrice: 'Close', OpenPrice: 'Open',
     High: 'High', Low: 'Low', PrevClose: 'Prev Close',
     Change: 'Change %', ChangeVal: 'Change Value',
     Volume: 'Volume', Turnover: 'Turnover', NoOfTrades: 'Trades',
   }
   for (const [k, label] of Object.entries(PRICE_LABELS)) {
-    if (snapshot[k] !== undefined && snapshot[k] !== null && snapshot[k] !== '') {
-      priceFields[label] = snapshot[k]
+    const v = snapshot[k]
+    if (v !== undefined && v !== null && v !== '' && v !== '0' && v !== 0) {
+      priceFields[label] = v
     }
   }
 
   return (
     <div className="space-y-4">
       <div className="flex items-baseline gap-3">
-        <span className="text-3xl font-bold text-white">
-          {fmt(snapshot.LTP ?? snapshot.ClosePrice)}
-        </span>
+        <div>
+          <span className="text-3xl font-bold text-white">
+            {fmt(snapshot.LTP ?? snapshot.ClosePrice)}
+          </span>
+          <span className="text-xs text-gray-500 ml-1">LTP</span>
+        </div>
         <span className={`text-lg font-semibold ${
           isNegative(snapshot.Change) ? 'text-red-400' : 'text-green-400'
         }`}>
-          {snapshot.Change ? `${parseFloat(snapshot.Change) >= 0 ? '+' : ''}${snapshot.Change}%` : ''}
+          {snapshot.Change && parseFloat(snapshot.Change) !== 0
+            ? `${parseFloat(snapshot.Change) >= 0 ? '+' : ''}${snapshot.Change}%`
+            : ''}
         </span>
       </div>
 

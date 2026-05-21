@@ -68,22 +68,38 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   async getCompanies(page = 1, limit = 20, search?: string) {
     const offset = (page - 1) * limit;
-    const where  = search
-      ? `WHERE symbol ILIKE $3
-           OR long_name_en  ILIKE $3
-           OR short_name_en ILIKE $3
-           OR clone_name    ILIKE $3`
-      : '';
-    const params: any[] = [limit, offset, ...(search ? [`%${search}%`] : [])];
 
+    if (search) {
+      // When search is present: $1 = search pattern (shared by WHERE and COUNT),
+      // $2 = limit, $3 = offset (main query only).
+      const like  = `%${search}%`;
+      const where = `WHERE (symbol       ILIKE $1
+                         OR long_name_en  ILIKE $1
+                         OR short_name_en ILIKE $1
+                         OR clone_name    ILIKE $1)`;
+
+      const [rows, countRow] = await Promise.all([
+        this.query(
+          `SELECT * FROM companies ${where} ORDER BY symbol LIMIT $2 OFFSET $3`,
+          [like, limit, offset],
+        ),
+        this.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM companies ${where}`,
+          [like],
+        ),
+      ]);
+      return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
+    }
+
+    // No search — simpler query, no parameter numbering issue
     const [rows, countRow] = await Promise.all([
       this.query(
-        `SELECT * FROM companies ${where} ORDER BY symbol LIMIT $1 OFFSET $2`,
-        params,
+        `SELECT * FROM companies ORDER BY symbol LIMIT $1 OFFSET $2`,
+        [limit, offset],
       ),
       this.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM companies ${where}`,
-        search ? [`%${search}%`] : [],
+        `SELECT COUNT(*)::text AS count FROM companies`,
+        [],
       ),
     ]);
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
@@ -193,23 +209,25 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
   // ─── FAQs ─────────────────────────────────────────────────────────────────
 
   async getFaqs(page = 1, limit = 20, category?: string, activeOnly = false) {
-    const offset  = (page - 1) * limit;
-    const filters: string[] = [];
-    const params: any[]     = [limit, offset];
+    const offset       = (page - 1) * limit;
+    const filterParams: any[] = [];
+    const filters: string[]   = [];
 
-    if (category)   { params.push(category);  filters.push(`category = $${params.length}`); }
+    // Filter params come FIRST so both main query and COUNT share $1, $2, ...
+    if (category)   { filterParams.push(category); filters.push(`category = $${filterParams.length}`); }
     if (activeOnly) { filters.push('is_active = true'); }
 
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const n     = filterParams.length;
 
     const [rows, countRow] = await Promise.all([
       this.query(
-        `SELECT * FROM faqs ${where} ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        params,
+        `SELECT * FROM faqs ${where} ORDER BY created_at DESC LIMIT $${n + 1} OFFSET $${n + 2}`,
+        [...filterParams, limit, offset],
       ),
       this.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM faqs ${where}`,
-        params.slice(2),
+        filterParams,
       ),
     ]);
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
@@ -238,25 +256,34 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
   // ─── Knowledge Base ───────────────────────────────────────────────────────
 
   async getKnowledgeBase(page = 1, limit = 20, category?: string, search?: string) {
-    const offset  = (page - 1) * limit;
-    const filters: string[] = [];
-    const params: any[]     = [limit, offset];
+    const offset       = (page - 1) * limit;
+    const filterParams: any[] = [];
+    const filters: string[]   = [];
 
-    if (category) { params.push(category); filters.push(`category = $${params.length}`); }
-    if (search)   { params.push(`%${search}%`); filters.push(`(title ILIKE $${params.length} OR content ILIKE $${params.length})`); }
+    if (category) {
+      filterParams.push(category);
+      filters.push(`category = $${filterParams.length}`);
+    }
+    if (search) {
+      filterParams.push(`%${search}%`);
+      const i = filterParams.length;
+      filters.push(`(title ILIKE $${i} OR content ILIKE $${i})`);
+    }
 
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const n     = filterParams.length;
 
     const [rows, countRow] = await Promise.all([
       this.query(
         `SELECT id,title,category,source,tags,created_at,updated_at,
                 LEFT(content,200) AS content_preview
-         FROM knowledge_base ${where} ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        params,
+         FROM knowledge_base ${where}
+         ORDER BY created_at DESC LIMIT $${n + 1} OFFSET $${n + 2}`,
+        [...filterParams, limit, offset],
       ),
       this.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM knowledge_base ${where}`,
-        params.slice(2),
+        filterParams,
       ),
     ]);
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
@@ -315,19 +342,20 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
   // ─── Unanswered Questions ─────────────────────────────────────────────────
 
   async getUnansweredQuestions(page = 1, limit = 20, status?: string) {
-    const offset = (page - 1) * limit;
-    const where  = status ? 'WHERE status = $3' : '';
-    const params: any[] = [limit, offset, ...(status ? [status] : [])];
+    const offset       = (page - 1) * limit;
+    const filterParams = status ? [status] : [];
+    const where        = status ? 'WHERE status = $1' : '';
+    const n            = filterParams.length;
 
     const [rows, countRow] = await Promise.all([
       this.query(
         `SELECT * FROM unanswered_questions ${where}
-         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        params,
+         ORDER BY created_at DESC LIMIT $${n + 1} OFFSET $${n + 2}`,
+        [...filterParams, limit, offset],
       ),
       this.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM unanswered_questions ${where}`,
-        status ? [status] : [],
+        filterParams,
       ),
     ]);
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };
@@ -379,23 +407,24 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getApiEndpoints(page = 1, limit = 20, category?: string, activeOnly = false) {
-    const offset  = (page - 1) * limit;
-    const filters: string[] = [];
-    const params: any[]     = [limit, offset];
+    const offset       = (page - 1) * limit;
+    const filterParams: any[] = [];
+    const filters: string[]   = [];
 
-    if (category)   { params.push(category); filters.push(`category = $${params.length}`); }
+    if (category)   { filterParams.push(category); filters.push(`category = $${filterParams.length}`); }
     if (activeOnly) { filters.push('is_active = true'); }
 
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const n     = filterParams.length;
 
     const [rows, countRow] = await Promise.all([
       this.query(
-        `SELECT * FROM api_endpoints ${where} ORDER BY category, name LIMIT $1 OFFSET $2`,
-        params,
+        `SELECT * FROM api_endpoints ${where} ORDER BY category, name LIMIT $${n + 1} OFFSET $${n + 2}`,
+        [...filterParams, limit, offset],
       ),
       this.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM api_endpoints ${where}`,
-        params.slice(2),
+        filterParams,
       ),
     ]);
     return { data: rows, total: parseInt(countRow[0].count, 10), page, limit };

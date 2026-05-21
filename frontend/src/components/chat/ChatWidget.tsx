@@ -1,13 +1,19 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Bot, Send, X, Maximize2, Minimize2, Trash2, ThumbsUp, ThumbsDown, Globe } from 'lucide-react'
+import { Bot, Send, X, Maximize2, Minimize2, Trash2, ThumbsUp, ThumbsDown, Globe, Search } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useChatStore } from '../../lib/store'
-import { streamChat, getSuggestions, submitFeedback } from '../../lib/api'
+import { streamChat, getSuggestions, submitFeedback, searchCompanySymbols } from '../../lib/api'
 import { Message } from '../../types'
 import clsx from 'clsx'
+
+interface CompanyOption {
+  symbol: string
+  nameEn: string
+  nameAr: string
+}
 
 interface Props {
   mode?: 'widget' | 'fullscreen' | 'embedded'
@@ -19,11 +25,61 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
   const [input, setInput] = useState('')
   const [suggestions, setSuggestions] = useState<string[]>([])
 
+  // ── Symbol autocomplete state ─────────────────────────────────────
+  const [symResults, setSymResults] = useState<CompanyOption[]>([])
+  const [showSym, setShowSym] = useState(false)
+  const [symIdx, setSymIdx] = useState(0)
+  const symDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const symMenuRef = useRef<HTMLDivElement>(null)
+
   const { messages, sessionId, isLoading, language, addMessage, updateMessage, clearHistory, setLoading, setLanguage } = useChatStore()
 
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const isRTL = language === 'ar'
+
+  // ── Symbol autocomplete helpers ───────────────────────────────────
+
+  /** Extract the /query fragment immediately before the cursor, or null */
+  const getSlashQuery = useCallback((val: string, cursor: number) => {
+    const before = val.slice(0, cursor)
+    const m = before.match(/(?:^|(?<=\s))\/(\S*)$/)
+    return m ? m[1] : null
+  }, [])
+
+  /** Fetch symbols debounced (200 ms) */
+  const fetchSymbols = useCallback((q: string) => {
+    if (symDebounce.current) clearTimeout(symDebounce.current)
+    symDebounce.current = setTimeout(async () => {
+      try {
+        const r = await searchCompanySymbols(q || undefined)
+        setSymResults(r.data ?? [])
+        setSymIdx(0)
+      } catch {
+        setSymResults([])
+      }
+    }, 200)
+  }, [])
+
+  /** Replace the /query token in the textarea with the chosen symbol */
+  const pickSymbol = useCallback((opt: CompanyOption) => {
+    const cursor = inputRef.current?.selectionStart ?? input.length
+    const before = input.slice(0, cursor)
+    // Find where the last `/token` starts
+    const slashPos = before.search(/(?:^|(?<=\s))\/\S*$/)
+    if (slashPos !== -1) {
+      const after = input.slice(cursor)
+      const newVal = input.slice(0, slashPos) + opt.symbol + after
+      setInput(newVal)
+      // Move cursor after inserted symbol
+      requestAnimationFrame(() => {
+        const pos = slashPos + opt.symbol.length
+        inputRef.current?.setSelectionRange(pos, pos)
+        inputRef.current?.focus()
+      })
+    }
+    setShowSym(false)
+  }, [input])
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -211,22 +267,101 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
 
       {/* ── Input ─────────────────────────────────────────────── */}
       <div className="px-3 pb-3 pt-2 border-t border-gray-700/60">
+
+        {/* Symbol autocomplete dropdown — floats above the input */}
+        {showSym && symResults.length > 0 && (
+          <div
+            ref={symMenuRef}
+            className="mb-2 bg-gray-800 border border-gray-600 rounded-xl overflow-hidden shadow-2xl max-h-52 overflow-y-auto"
+          >
+            {/* Header */}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-gray-700 bg-gray-900/60">
+              <Search size={11} className="text-blue-400" />
+              <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">
+                Company symbols — ↑↓ to navigate · Enter to select · Esc to close
+              </span>
+            </div>
+            {symResults.map((opt, i) => (
+              <button
+                key={opt.symbol}
+                onMouseDown={e => { e.preventDefault(); pickSymbol(opt) }}
+                className={clsx(
+                  'w-full text-left flex items-center gap-3 px-3 py-2 transition',
+                  i === symIdx
+                    ? 'bg-blue-700/40 text-white'
+                    : 'text-gray-300 hover:bg-gray-700/50',
+                )}
+              >
+                <span className="font-mono font-bold text-blue-300 text-sm w-16 flex-shrink-0">
+                  {opt.symbol}
+                </span>
+                <span className="text-xs text-gray-400 truncate flex-1">{opt.nameEn}</span>
+                {opt.nameAr && (
+                  <span className="text-xs text-gray-600 truncate max-w-[80px]" dir="rtl">
+                    {opt.nameAr}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex gap-2 items-end">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                handleSend()
-              }
-            }}
-            placeholder={isRTL ? 'اسأل عن سوق مسقط...' : 'Ask about Muscat Stock Exchange...'}
-            rows={1}
-            className="flex-1 resize-none bg-gray-800 border border-gray-600 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-blue-500 text-gray-100 placeholder-gray-500 max-h-24 overflow-y-auto"
-            style={{ direction: isRTL ? 'rtl' : 'ltr' }}
-          />
+          <div className="flex-1 relative">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={e => {
+                const val = e.target.value
+                setInput(val)
+                const cursor = e.target.selectionStart ?? val.length
+                const q = getSlashQuery(val, cursor)
+                if (q !== null) {
+                  setShowSym(true)
+                  fetchSymbols(q)
+                } else {
+                  setShowSym(false)
+                }
+              }}
+              onKeyDown={e => {
+                // Symbol menu navigation takes priority
+                if (showSym && symResults.length > 0) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setSymIdx(i => Math.min(i + 1, symResults.length - 1))
+                    return
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setSymIdx(i => Math.max(i - 1, 0))
+                    return
+                  }
+                  if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault()
+                    if (symResults[symIdx]) pickSymbol(symResults[symIdx])
+                    return
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setShowSym(false)
+                    return
+                  }
+                }
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  handleSend()
+                }
+              }}
+              onBlur={() => {
+                // Delay so onMouseDown on a menu item fires first
+                setTimeout(() => setShowSym(false), 150)
+              }}
+              placeholder={isRTL ? 'اسأل عن سوق مسقط... (اكتب / للبحث عن شركة)' : 'Ask about MSX... (type / to search a company)'}
+              rows={1}
+              className="w-full resize-none bg-gray-800 border border-gray-600 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-blue-500 text-gray-100 placeholder-gray-500 max-h-24 overflow-y-auto"
+              style={{ direction: isRTL ? 'rtl' : 'ltr' }}
+            />
+          </div>
           <button
             onClick={() => handleSend()}
             disabled={!input.trim() || isLoading}
@@ -241,7 +376,7 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
           </button>
         </div>
         <p className="text-center text-xs text-gray-600 mt-1.5">
-          Powered by MSX AI · {isRTL ? 'Enter للإرسال' : 'Enter to send'}
+          Powered by MSX AI · {isRTL ? 'اكتب / للبحث عن شركة' : 'Type / to look up a company symbol'}
         </p>
       </div>
     </div>

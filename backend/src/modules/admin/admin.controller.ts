@@ -414,10 +414,10 @@ export class AdminController {
   }
 
   @Get('companies/chart/:symbol')
-  @ApiOperation({ summary: 'Historical OHLCV chart data' })
+  @ApiOperation({ summary: 'Real-time intraday chart data from company-chart-data.aspx' })
   @ApiQuery({ name: 'period', required: false })
   getCompanyChart(@Param('symbol') symbol: string) {
-    return this.dynamicApi.getCompanyData('Chart Data 1 Month', symbol);
+    return this.dynamicApi.getChartData(symbol);
   }
 
   @Get('companies/dividends/:symbol')
@@ -433,9 +433,9 @@ export class AdminController {
   }
 
   @Get('companies/board/:symbol')
-  @ApiOperation({ summary: 'Board of directors' })
+  @ApiOperation({ summary: 'Board of directors — normalised role/name pairs' })
   getCompanyBoard(@Param('symbol') symbol: string) {
-    return this.dynamicApi.getCompanyData('Board of Directors', symbol);
+    return this.dynamicApi.getBoardMembers(symbol);
   }
 
   @Get('companies/ownership/:symbol')

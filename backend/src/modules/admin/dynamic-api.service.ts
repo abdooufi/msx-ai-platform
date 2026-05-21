@@ -22,7 +22,7 @@ const CACHE_TTL: Record<string, number> = {
 // ─── Exact field mapping from real MSX API response ──────────────────────────
 const FIELD_MAP: Record<string, string> = {
   // Price
-  LTP:              'Last Price',
+  LTP:              'Current Price (LTP)',
   ClosePrice:       'Close Price',
   OpenPrice:        'Open Price',
   High:             'High',
@@ -68,7 +68,7 @@ const FIELD_MAP: Record<string, string> = {
 };
 
 const PRIORITY_FIELDS = [
-  'Last Price', 'Change %', 'Change Value', 'Trend',
+  'Current Price (LTP)', 'Change %', 'Change Value', 'Trend',
   'Open Price', 'High', 'Low', 'Previous Close',
   'Volume', 'Turnover', 'No. of Trades', 'Last Trade Volume',
   'Bid Price', 'Ask Price', 'Market Group',
@@ -153,14 +153,14 @@ const DEFAULT_ENDPOINTS = [
     is_active:   true,
   },
   {
-    name:        'Chart Data 1 Month',
-    description: 'Historical OHLCV chart data for the past month',
-    url:         `${BASE}/snapshot.aspx/CompanyChartData`,
-    method:      'POST',
-    body:        { Symbol: '{Symbol}' },
+    name:        'Chart Data',
+    description: 'Real-time intraday trade data — each trade record with LTP, Volume and timestamp',
+    url:         `${BASE}/company-chart-data.aspx?t=true&s={symbol}`,
+    method:      'GET',
+    body:        {},
     headers:     {},
-    keywords_en: ['chart', 'graph', 'historical', 'ohlcv', 'candlestick', 'price history'],
-    keywords_ar: ['رسم بياني', 'مخطط', 'تاريخ السعر', 'بيانات تاريخية'],
+    keywords_en: ['chart', 'graph', 'historical', 'ohlcv', 'candlestick', 'price history', 'intraday', 'trades today'],
+    keywords_ar: ['رسم بياني', 'مخطط', 'تاريخ السعر', 'بيانات تاريخية', 'صفقات اليوم'],
     category:    'chart',
     is_active:   true,
   },
@@ -744,6 +744,80 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
     }
 
     return [];
+  }
+
+  // ─── Chart data (intraday) ────────────────────────────────────────────────
+
+  /**
+   * Fetch real-time intraday chart data from company-chart-data.aspx.
+   * Returns an array of trade records: { Year, Month, Day, Hour, Minute, LTP, Volume, Value, Turnover }.
+   * The Date field is null — date must be constructed from the numeric fields.
+   */
+  async getChartData(symbol: string): Promise<any> {
+    const ep = {
+      name:     'Chart Data',
+      url:      `${BASE}/company-chart-data.aspx?t=true&s={symbol}`,
+      method:   'GET',
+      body:     {},
+      headers:  {},
+      category: 'chart',
+    };
+    return this.callEndpoint(ep, symbol);
+  }
+
+  // ─── Board members transformer ────────────────────────────────────────────
+
+  /**
+   * Fetch board/profile data from BODMembersSnap.aspx and normalise it into
+   * a flat array of { role, nameEn, nameAr } objects that the frontend can
+   * display generically.
+   *
+   * BODMembersSnap returns an array where the first element is the company
+   * profile record (ChairmanEn/Ar, DeputyEn/Ar, MemberNameEn/Ar, etc.).
+   */
+  async getBoardMembers(symbol: string): Promise<{ role: string; nameEn: string; nameAr: string }[]> {
+    const raw = await this.getCompanyData('Board of Directors', symbol);
+    const rec = Array.isArray(raw) ? (raw[0] ?? {}) : (raw ?? {});
+
+    const ROLES: Array<[string, string, string]> = [
+      // [displayRole, EnField, ArField]
+      ['Chairman',                 'ChairmanEn',             'ChairmanAr'],
+      ['Deputy',                   'DeputyEn',               'DeputyAr'],
+      ['Secretary',                'SecretaryEn',            'SecretaryAr'],
+      ['Members',                  'MembersEn',              'MembersAr'],
+      ['Executive President',      'ExecutivePresidentEn',   'ExecutivePresidentAr'],
+      ['Deputy Exec. President',   'DeputyExecutivePresidentEn', 'DeputyExecutivePresidentAr'],
+      ['Managing Director',        'ManagingDirectorEn',     'ManagingDirectorAr'],
+      ['Internal Auditor',         'InternalAuditorAr',      'InternalAuditorAr'],
+      ['Legal Advisor',            'LegalAdvisorEn',         'LegalAdvisorAr'],
+      ['Auditor',                  'AuditorEn',              'AuditorAr'],
+    ];
+
+    // Also include individual member rows (when endpoint returns multiple rows)
+    const members = Array.isArray(raw) ? raw : [];
+    const result: { role: string; nameEn: string; nameAr: string }[] = [];
+
+    // Named roles from the first record
+    for (const [role, enField, arField] of ROLES) {
+      const nameEn = String(rec[enField] ?? '').trim();
+      const nameAr = String(rec[arField] ?? '').trim();
+      if (nameEn || nameAr) {
+        result.push({ role, nameEn, nameAr });
+      }
+    }
+
+    // Additional member rows (some companies return each board member as a separate array element)
+    for (let i = 1; i < members.length; i++) {
+      const m = members[i];
+      const nameEn = String(m.MemberNameEn ?? m.NameEn ?? m.ExecutivePresidentEn ?? '').trim();
+      const nameAr = String(m.MemberNameAr ?? m.NameAr ?? '').trim();
+      const role   = String(m.IndependentEn ?? m.ExecutiveEn ?? m.ShareholderEn ?? 'Member').trim();
+      if (nameEn || nameAr) {
+        result.push({ role, nameEn, nameAr });
+      }
+    }
+
+    return result;
   }
 
   // ─── Company data by category ────────────────────────────────────────────

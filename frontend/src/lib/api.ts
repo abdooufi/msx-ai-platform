@@ -37,6 +37,12 @@ export const login = (email: string, password: string) =>
 export const getSuggestions = (lang = 'en') =>
   api.get(`/chat/suggestions?lang=${lang}`)
 
+/** Public — no auth needed. Returns [{symbol, nameEn, nameAr}] */
+export const searchCompanySymbols = (q?: string) =>
+  api.get<{ symbol: string; nameEn: string; nameAr: string }[]>(
+    `/chat/companies${q ? `?q=${encodeURIComponent(q)}` : ''}`,
+  )
+
 export const submitFeedback = (
   sessionId: string, messageId: string,
   feedback: 'positive' | 'negative', note?: string,

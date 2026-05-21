@@ -3,16 +3,20 @@ import {
   UseGuards, HttpCode, HttpStatus, Ip,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { ChatService } from './chat.service';
 import { ChatRequestDto, FeedbackDto } from './chat.dto';
+import { ChatbootPgService } from '../admin/chatboot-pg.service';
 
 @ApiTags('Chat')
 @UseGuards(ThrottlerGuard)
 @Controller('chat')
 export class ChatController {
-  constructor(private readonly chatService: ChatService) {}
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly pg: ChatbootPgService,
+  ) {}
 
   /**
    * POST /api/chat
@@ -64,5 +68,22 @@ export class ChatController {
   async getSuggestions(@Query('lang') lang: string = 'en') {
     const language = lang === 'ar' ? 'ar' : 'en';
     return { suggestions: await this.chatService.getSuggestions(language) };
+  }
+
+  /**
+   * GET /api/chat/companies?q=oqep
+   * Public endpoint — returns matching company symbols for chat autocomplete.
+   * No auth required. Used by the "/" trigger in the chat input.
+   */
+  @Get('companies')
+  @ApiOperation({ summary: 'Search company symbols for chat / autocomplete (public)' })
+  @ApiQuery({ name: 'q', required: false, description: 'Symbol / name filter' })
+  async getCompanySymbols(@Query('q') q?: string) {
+    const result = await this.pg.getCompanies(1, 40, q || undefined);
+    return (result.data as any[]).map(c => ({
+      symbol:  c.symbol,
+      nameEn:  c.long_name_en  ?? c.short_name_en ?? c.symbol,
+      nameAr:  c.long_name_ar  ?? c.short_name_ar ?? '',
+    }));
   }
 }
