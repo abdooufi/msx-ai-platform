@@ -33,13 +33,73 @@ export class ChatService {
     private dynamicApi: DynamicApiService,
   ) {}
 
+  // ── Off-topic guard ───────────────────────────────────────────────
+
+  /**
+   * Returns a refusal message if the question is clearly unrelated to MSX,
+   * or null if it should be forwarded to the LLM.
+   *
+   * Strategy:
+   *   1. If the message contains ANY MSX/finance keyword → allow (return null)
+   *   2. If the message contains an obvious off-topic keyword → block (return message)
+   *   3. Otherwise → allow (let the LLM + system-prompt handle ambiguous cases)
+   */
+  private checkOffTopic(message: string, language: string): string | null {
+    const m = message.toLowerCase();
+
+    // ── Finance / MSX allow-list (any match → pass through) ──────────
+    const financeTerms = [
+      // English
+      'stock', 'share', 'price', 'market', 'msx', 'msm', 'trade', 'trading',
+      'invest', 'dividend', 'portfolio', 'index', 'indices', 'company', 'compan',
+      'exchange', 'equity', 'sector', 'listed', 'ipo', 'financial', 'earnings',
+      'revenue', 'profit', 'loss', 'balance', 'quarter', 'annual', 'report',
+      'oman', 'omani', 'muscat', 'bourse', 'gain', 'gainer', 'loser', 'volume',
+      'turnover', 'bid', 'ask', 'ltp', 'ohlc', 'chart', 'candlestick',
+      'shareholder', 'board', 'ceo', 'chairman', 'subsidiary', 'ownership',
+      // Arabic
+      'سهم', 'سعر', 'سوق', 'تداول', 'استثمار', 'شركة', 'مؤشر', 'أرباح',
+      'توزيع', 'بورصة', 'مسقط', 'عُمان', 'عمان', 'مالي', 'ربح', 'خسارة',
+    ];
+    if (financeTerms.some(t => m.includes(t))) return null;
+
+    // ── Clearly off-topic block-list ──────────────────────────────────
+    const offTopicTerms = [
+      // Travel & tourism
+      'travel', 'trip', 'vacation', 'holiday', 'tourism', 'hotel', 'resort',
+      'flight', 'airline', 'destination', 'passport', 'visa', 'tour', 'cruise',
+      'beach', 'mountain', 'سفر', 'سياح', 'فندق', 'رحلة', 'عطلة', 'طيران',
+      // Food & cooking
+      'recipe', 'cook', 'restaurant', 'food', 'meal', 'dish', 'cuisine',
+      'ingredient', 'طبخ', 'وصفة', 'مطعم', 'أكل', 'طعام',
+      // Health & medicine
+      'doctor', 'hospital', 'medicine', 'symptom', 'disease', 'treatment',
+      'pharmacy', 'drug', 'طبيب', 'مستشفى', 'دواء', 'علاج', 'مرض',
+      // Sports & entertainment
+      'football', 'soccer', 'basketball', 'cricket', 'tennis', 'sport',
+      'movie', 'film', 'series', 'music', 'song', 'concert', 'celebrity',
+      'كرة', 'رياضة', 'فيلم', 'موسيقى', 'مسلسل',
+      // General knowledge / off-topic
+      'weather', 'forecast', 'poem', 'story', 'joke', 'game', 'quiz',
+      'طقس', 'نكتة', 'قصيدة', 'لعبة',
+    ];
+    if (offTopicTerms.some(t => m.includes(t))) {
+      return language === 'ar'
+        ? 'أنا مساعد بورصة مسقط المتخصص ولا أستطيع الإجابة على أسئلة خارج نطاق السوق المالي العُماني. يمكنني مساعدتك في أسعار الأسهم والشركات المدرجة والمؤشرات وبيانات التداول في بورصة مسقط.'
+        : "I'm the MSX Stock Exchange Assistant. I can only help with questions about the Muscat Stock Exchange — stocks, companies, market data, and trading. For other topics, please use a dedicated service.";
+    }
+
+    return null; // let the LLM decide
+  }
+
   /**
    * Main streaming chat endpoint.
    * 1. Detect language
-   * 2. Retrieve RAG context from Qdrant
-   * 3. Build LLM messages
-   * 4. Stream response via SSE
-   * 5. Persist conversation
+   * 2. Off-topic guard (fast path — no LLM tokens used)
+   * 3. Retrieve RAG context from Qdrant
+   * 4. Build LLM messages
+   * 5. Stream response via SSE
+   * 6. Persist conversation
    */
   async streamChat(dto: ChatRequestDto, res: Response): Promise<void> {
     const sessionId = dto.sessionId || uuidv4();
@@ -48,14 +108,34 @@ export class ChatService {
     // 1. Detect language
     const language = await this.llm.detectLanguage(dto.message);
 
-    // 2. Resolve company symbol (static patterns + DB alias fallback) in parallel with RAG
+    // 2. Off-topic guard — fast path, zero LLM tokens
+    const refusal = this.checkOffTopic(dto.message, language);
+    if (refusal) {
+      if (!res.headersSent) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+      }
+      res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
+      res.write(`data: ${JSON.stringify({ delta: refusal })}\n\n`);
+      res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs: Date.now() - start })}\n\n`);
+      res.end();
+      await this.persistMessage(sessionId, dto, {
+        response: refusal, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
+      });
+      return;
+    }
+
+    // 3. Resolve symbol + RAG in parallel
     const [ragResult, symbol] = await Promise.all([
       this.rag.retrieve(dto.message, language),
       this.dynamicApi.resolveSymbolWithDb(dto.message),
     ]);
     const { context, sources, hadResults } = ragResult;
 
-    // 3. Fetch live market data for the resolved symbol (sequential — needs symbol first)
+    // 4. Fetch live market data (sequential — needs symbol first)
     const liveData = symbol
       ? await this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
       : null;
@@ -64,13 +144,13 @@ export class ChatService {
       this.logger.log(`Live data injected for symbol: ${symbol}`);
     }
 
-    // 4. Build conversation history (last 10 turns for context window)
+    // 5. Build conversation history (last 10 turns for context window)
     const historyMessages: LlmMessage[] = (dto.history || [])
       .slice(-10)
       .filter(h => h.role && h.content)
       .map(h => ({ role: h.role as 'user' | 'assistant', content: h.content }));
 
-    // 5. Build system prompt with retrieved context and live data
+    // 6. Build system prompt with retrieved context and live data
     const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData);
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -78,7 +158,7 @@ export class ChatService {
       { role: 'user', content: dto.message },
     ];
 
-    // Set SSE headers BEFORE any write (headers must be sent before body)
+    // 7. Set SSE headers BEFORE any write
     if (!res.headersSent) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -98,7 +178,7 @@ export class ChatService {
       })}\n\n`,
     );
 
-    // 6. Stream LLM response
+    // 8. Stream LLM response
     let fullResponse = '';
     let tokensUsed = 0;
     let latencyMs = 0;
