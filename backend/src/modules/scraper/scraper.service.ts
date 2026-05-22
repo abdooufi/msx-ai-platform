@@ -153,7 +153,7 @@ export class ScraperService {
       companies.map(c =>
         this.scraperQueue.add(
           CrawlJobType.CRAWL_PAGE,
-          { url: c.url },
+          { url: c.url, companySymbol: c.symbol },
           { priority: 4, attempts: 2 },
         ),
       ),

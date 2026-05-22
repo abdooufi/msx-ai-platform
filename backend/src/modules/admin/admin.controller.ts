@@ -72,6 +72,12 @@ export class AdminController {
     return this.llm.getProviderInfo();
   }
 
+  @Get('ai-provider/balance')
+  @ApiOperation({ summary: 'Check live balance/quota for each configured AI provider' })
+  getAiProviderBalance() {
+    return this.llm.getProviderBalance();
+  }
+
   @Post('ai-provider')
   @ApiOperation({ summary: 'Switch AI provider at runtime (no restart needed)' })
   async setAiProvider(@Body() body: { provider: AiProvider }, @Request() req) {

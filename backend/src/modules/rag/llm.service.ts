@@ -41,6 +41,12 @@ export interface ProviderInfo {
   autoLastPicked?: string;
 }
 
+export interface ProviderBalance {
+  deepseek: { available: boolean; totalBalance: string; currency: string } | null;
+  claude:   { available: boolean } | null;
+  ollama:   { available: boolean } | null;
+}
+
 @Injectable()
 export class LlmService {
   private readonly logger = new Logger(LlmService.name);
@@ -429,6 +435,72 @@ export class LlmService {
     }
   }
 
+  // ─── Balance / quota ─────────────────────────────────────────────────────
+
+  /**
+   * Fetch live balance from each configured cloud provider.
+   * DeepSeek exposes a public /user/balance endpoint.
+   * Claude (Anthropic) has no public balance API — we just confirm the key is set.
+   * Ollama is local/free — always "available".
+   */
+  async getProviderBalance(): Promise<ProviderBalance> {
+    const [deepseek, claude, ollama] = await Promise.all([
+      this.fetchDeepSeekBalance(),
+      this.checkClaudeKey(),
+      this.checkOllama(),
+    ]);
+    return { deepseek, claude, ollama };
+  }
+
+  private async fetchDeepSeekBalance(): Promise<ProviderBalance['deepseek']> {
+    const apiKey = this.config.get<string>('DEEPSEEK_API_KEY', '');
+    if (!apiKey) return null;
+
+    try {
+      const res = await axios.get('https://api.deepseek.com/user/balance', {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeout: 8_000,
+      });
+      const info = res.data?.balance_infos?.[0];
+      return {
+        available:    res.data?.is_available ?? true,
+        totalBalance: info?.total_balance ?? '—',
+        currency:     info?.currency      ?? 'USD',
+      };
+    } catch (err) {
+      this.logger.warn(`DeepSeek balance check failed: ${err.message}`);
+      return { available: false, totalBalance: '—', currency: 'USD' };
+    }
+  }
+
+  private async checkClaudeKey(): Promise<ProviderBalance['claude']> {
+    if (!this.claudeApiKey) return null;
+    // Anthropic has no public balance endpoint — validate key with a tiny models list call
+    try {
+      await axios.get(`${this.claudeBaseUrl}/v1/models`, {
+        headers: {
+          'x-api-key': this.claudeApiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        timeout: 6_000,
+      });
+      return { available: true };
+    } catch (err) {
+      const status = err?.response?.status;
+      // 200 = good, 401 = bad key, 403 = no access, anything else may be network
+      return { available: status !== 401 && status !== 403 };
+    }
+  }
+
+  private async checkOllama(): Promise<ProviderBalance['ollama']> {
+    try {
+      await axios.get(`${this.ollamaUrl}/api/tags`, { timeout: 4_000 });
+      return { available: true };
+    } catch {
+      return { available: false };
+    }
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /** Fast heuristic language detection (no LLM call) */
@@ -442,21 +514,40 @@ export class LlmService {
     return 'en';
   }
 
-  /** Build the MSX system prompt in the detected language */
+  /**
+   * Build the MSX system prompt in the detected language.
+   *
+   * @param hasContext  true  → RAG context or live data is present; LLM should use it.
+   *                   false → no data found; LLM must say so and not invent anything.
+   */
   buildSystemPrompt(
     language: 'ar' | 'en' | 'mixed',
     context: string,
     liveData?: string | null,
+    hasContext = false,
   ): string {
     if (language === 'ar') {
       const liveSection = liveData
         ? `\n📡 بيانات السوق المباشرة (بيانات حقيقية من MSX.om — استخدمها أولاً):\n${liveData}\n`
         : '';
       const ragSection = context
-        ? `\nمعلومات من قاعدة المعرفة:\n${context}\n`
+        ? `\n📚 معلومات من قاعدة المعرفة (المصدر الوحيد المسموح باستخدامه):\n${context}\n`
         : '';
+      const noDataWarning = !hasContext
+        ? `\n⚠️ لا توجد بيانات متاحة في قاعدة المعرفة لهذا السؤال.\n`
+        : '';
+
       return `أنت مساعد بورصة مسقط الذكي — مساعد متخصص حصرياً في بورصة مسقط (MSX).
-${liveSection}${ragSection}
+${liveSection}${ragSection}${noDataWarning}
+━━━ قاعدة البيانات الخاصة ━━━
+⛔ يُحظر تماماً استخدام أي معلومات من ذاكرتك أو تدريبك الداخلي للإجابة على الأسئلة.
+✅ يجب أن تعتمد فقط على:
+  ١. بيانات السوق المباشرة المقدمة أعلاه
+  ٢. معلومات قاعدة المعرفة المقدمة أعلاه
+
+${!hasContext ? `بما أنه لا توجد بيانات متاحة لهذا السؤال، يجب أن تردّ بالضبط:
+"لا تتوفر لديّ معلومات كافية حول هذا الموضوع في قاعدة بياناتي. يرجى زيارة www.msx.om للحصول على أحدث المعلومات."` : ''}
+
 ━━━ نطاق عملك ━━━
 تجيب فقط على الأسئلة المتعلقة بـ:
 • أسعار الأسهم والشركات المدرجة في بورصة مسقط
@@ -466,13 +557,13 @@ ${liveSection}${ragSection}
 • اللوائح والتشريعات المتعلقة بسوق رأس المال العُماني
 
 ━━━ قاعدة صارمة ━━━
-إذا كان السؤال لا علاقة له ببورصة مسقط أو الأسواق المالية العُمانية — مثل السفر والسياحة والطبخ والصحة والرياضة والأفلام أو أي موضوع آخر — يجب أن تردّ بالضبط بهذه الجملة:
+إذا كان السؤال لا علاقة له ببورصة مسقط — مثل السفر والسياحة والطبخ والصحة والرياضة والأفلام أو أي موضوع آخر — يجب أن تردّ بالضبط بهذه الجملة:
 "أنا مساعد بورصة مسقط المتخصص ولا أستطيع الإجابة على أسئلة خارج نطاق السوق المالي العُماني. يمكنني مساعدتك في أسعار الأسهم والشركات المدرجة والمؤشرات وبيانات التداول في بورصة مسقط."
 
 قواعد إضافية:
 - إذا توفرت بيانات مباشرة، استخدمها كمصدر رئيسي وأجب بالأرقام الفعلية
-- لا تخترع أرقاماً أو أسعاراً
-- إذا وردت سجلات تداول بتوقيتات (جدول الوقت | السعر | الحجم)، اعرضها كملخص واضح: الافتتاح والأعلى والأدنى وآخر سعر وإجمالي الحجم، ثم صفوف التداول مرتبةً بالوقت — ولا تقل إنك لا تستطيع عرض رسم بياني
+- لا تخترع أرقاماً أو أسعاراً أو معلومات عن شركات
+- إذا وردت سجلات تداول بتوقيتات، اعرضها كملخص واضح: الافتتاح والأعلى والأدنى وآخر سعر وإجمالي الحجم
 - أجب بالعربية للأسئلة العربية
 - كن مختصراً ومهنياً`;
     }
@@ -481,11 +572,23 @@ ${liveSection}${ragSection}
       ? `\nLIVE MARKET DATA (real-time from MSX.om — use as primary source):\n${liveData}\n`
       : '';
     const ragSection = context
-      ? `\nKNOWLEDGE BASE CONTEXT:\n${context}\n`
+      ? `\nKNOWLEDGE BASE CONTEXT (the ONLY source you are allowed to use):\n${context}\n`
+      : '';
+    const noDataWarning = !hasContext
+      ? `\n⚠️ NO DATA AVAILABLE in the knowledge base for this query.\n`
       : '';
 
     return `You are the MSX Smart Assistant — an AI exclusively for the Muscat Stock Exchange (MSX / بورصة مسقط, www.msx.om).
-${liveSection}${ragSection}
+${liveSection}${ragSection}${noDataWarning}
+━━━ KNOWLEDGE BASE ONLY — CRITICAL RULE ━━━
+⛔ You are STRICTLY FORBIDDEN from using your internal training knowledge to answer any question.
+✅ You may ONLY use:
+  1. The LIVE MARKET DATA provided above
+  2. The KNOWLEDGE BASE CONTEXT provided above
+
+${!hasContext ? `Since no data is available for this query, you MUST reply with exactly:
+"I don't have enough information about this topic in my knowledge base. Please visit www.msx.om for the latest information."` : ''}
+
 ━━━ YOUR SCOPE ━━━
 You ONLY answer questions about:
 • MSX-listed company stocks, prices, and market data
@@ -498,13 +601,10 @@ You ONLY answer questions about:
 If the question is NOT about the Muscat Stock Exchange, Omani stock market, or MSX-listed companies — you MUST reply with EXACTLY this message (do NOT attempt to answer the question):
 "I'm the MSX Stock Exchange Assistant. I can only help with questions about the Muscat Stock Exchange — stocks, companies, market data, and trading. For other topics, please use a dedicated service."
 
-This rule applies to ANY off-topic question including: travel, tourism, food, health, sports, weather, general knowledge, technology, politics, entertainment, or anything unrelated to MSX.
-
 ━━━ ADDITIONAL RULES ━━━
 - If LIVE MARKET DATA is provided, prioritize it and quote exact numbers
 - Never fabricate prices, percentages, or company data
-- When intraday trade records are provided (Time | Price | Volume table), present them as a clear summary: open, high, low, last price, total volume, then the time-ordered trade rows — do NOT say you cannot show a chart
-- If no live data at all is available for a valid MSX question, say: "I don't have that data right now. Please visit www.msx.om for the latest information."
+- When intraday trade records are provided, present them as a clear summary: open, high, low, last price, total volume
 - Be professional, concise, and helpful
 - Respond in Arabic for Arabic questions`;
   }

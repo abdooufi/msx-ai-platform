@@ -14,15 +14,20 @@ export class AdminService {
   ) {}
 
   async getDashboardStats() {
+    const SAFE_PG: any = {
+      conversations: 0, messages: 0, failed: 0,
+      successRate: 100, avgLatencyMs: 0,
+      langBreakdown: {}, dailyMessages: [],
+      feedback: { positive: 0, negative: 0 },
+    };
+    const SAFE_RAG = { qdrantVectors: 0, pgDocuments: 0, companyStats: [] };
+
     const [pgStats, ragStats] = await Promise.all([
-      this.pg.getDashboardStats(),
-      this.rag.getStats(),
+      this.pg.getDashboardStats().catch(() => SAFE_PG),
+      this.rag.getStats().catch(() => SAFE_RAG),
     ]);
 
-    return {
-      ...pgStats,
-      ragStats,
-    };
+    return { ...pgStats, ragStats };
   }
 
   async getConversations(page = 1, limit = 20, filter: Record<string, any> = {}): Promise<any> {

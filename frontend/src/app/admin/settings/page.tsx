@@ -5,8 +5,9 @@ import {
   Settings, Cpu, Database, Globe, Zap, Shield,
   RefreshCcw, CheckCircle, Copy, ExternalLink, Info,
   Loader2, AlertTriangle, Sparkles, Shuffle,
+  Wallet, WifiOff, Wifi,
 } from 'lucide-react'
-import { getStats } from '../../../lib/api'
+import { getStats, getAiProviderBalance } from '../../../lib/api'
 import api from '../../../lib/api'
 import toast from 'react-hot-toast'
 
@@ -18,6 +19,12 @@ interface EnvSetting {
 }
 
 type AiProvider = 'ollama' | 'deepseek' | 'claude' | 'auto'
+
+interface ProviderBalance {
+  deepseek: { available: boolean; totalBalance: string; currency: string } | null
+  claude:   { available: boolean } | null
+  ollama:   { available: boolean } | null
+}
 
 interface ProviderInfo {
   provider: AiProvider
@@ -71,10 +78,12 @@ const PROVIDER_META: Record<AiProvider, {
 }
 
 export default function SettingsPage() {
-  const [stats, setStats]         = useState<any>(null)
-  const [loading, setLoading]     = useState(false)
-  const [provider, setProvider]   = useState<ProviderInfo | null>(null)
-  const [switching, setSwitching] = useState(false)
+  const [stats,          setStats]          = useState<any>(null)
+  const [loading,        setLoading]        = useState(false)
+  const [provider,       setProvider]       = useState<ProviderInfo | null>(null)
+  const [switching,      setSwitching]      = useState(false)
+  const [balance,        setBalance]        = useState<ProviderBalance | null>(null)
+  const [balanceLoading, setBalanceLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -92,7 +101,16 @@ export default function SettingsPage() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  const loadBalance = async () => {
+    setBalanceLoading(true)
+    try {
+      const res = await getAiProviderBalance()
+      setBalance(res.data)
+    } catch {}
+    finally { setBalanceLoading(false) }
+  }
+
+  useEffect(() => { load(); loadBalance() }, [])
 
   const switchProvider = async (target: AiProvider) => {
     if (!provider || provider.provider === target || switching) return
@@ -237,6 +255,112 @@ export default function SettingsPage() {
               <span className="ml-auto text-[11px] text-gray-600">
                 Embeddings always use Ollama (nomic-embed-text)
               </span>
+            </div>
+
+            {/* ── Balance Panel ──────────────────────────────────────────────────── */}
+            <div className="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Wallet size={14} className="text-yellow-400" />
+                  <span className="text-xs font-semibold text-white">API Balance &amp; Status</span>
+                </div>
+                <button
+                  onClick={loadBalance}
+                  disabled={balanceLoading}
+                  className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 px-2 py-1 bg-gray-700 rounded-lg transition"
+                >
+                  <RefreshCcw size={11} className={balanceLoading ? 'animate-spin' : ''} />
+                  Refresh
+                </button>
+              </div>
+
+              {balanceLoading && !balance ? (
+                <div className="flex items-center gap-2 text-xs text-gray-500 py-1">
+                  <Loader2 size={12} className="animate-spin" /> Checking balances…
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-3">
+
+                  {/* Ollama */}
+                  <div className="bg-gray-900/60 rounded-lg p-3 space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base">🦙</span>
+                      <span className="text-xs font-medium text-white">Ollama</span>
+                    </div>
+                    {balance?.ollama ? (
+                      balance.ollama.available ? (
+                        <div className="flex items-center gap-1.5 text-xs text-green-400">
+                          <Wifi size={11} /> Running
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 text-xs text-red-400">
+                          <WifiOff size={11} /> Offline
+                        </div>
+                      )
+                    ) : (
+                      <span className="text-xs text-gray-600">—</span>
+                    )}
+                    <p className="text-[10px] text-gray-600">Local · Free · No billing</p>
+                  </div>
+
+                  {/* DeepSeek */}
+                  <div className="bg-gray-900/60 rounded-lg p-3 space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base">🌊</span>
+                      <span className="text-xs font-medium text-white">DeepSeek</span>
+                    </div>
+                    {balance?.deepseek ? (
+                      <>
+                        <div className={`flex items-center gap-1.5 text-xs ${balance.deepseek.available ? 'text-green-400' : 'text-red-400'}`}>
+                          {balance.deepseek.available ? <Wifi size={11} /> : <WifiOff size={11} />}
+                          {balance.deepseek.available ? 'Available' : 'Unavailable'}
+                        </div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-lg font-bold text-white leading-none">
+                            {balance.deepseek.totalBalance}
+                          </span>
+                          <span className="text-[10px] text-gray-500">{balance.deepseek.currency}</span>
+                        </div>
+                        <p className="text-[10px] text-gray-600">Remaining balance</p>
+                      </>
+                    ) : !provider.deepseekConfigured ? (
+                      <p className="text-xs text-gray-600">Not configured</p>
+                    ) : (
+                      <p className="text-xs text-gray-500">—</p>
+                    )}
+                    {provider.deepseekConfigured && (
+                      <a href="https://platform.deepseek.com" target="_blank" rel="noreferrer"
+                        className="text-[10px] text-blue-500 hover:text-blue-400 flex items-center gap-0.5 transition">
+                        <ExternalLink size={9} /> platform.deepseek.com
+                      </a>
+                    )}
+                  </div>
+
+                  {/* Claude */}
+                  <div className="bg-gray-900/60 rounded-lg p-3 space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base">✦</span>
+                      <span className="text-xs font-medium text-white">Claude</span>
+                    </div>
+                    {balance?.claude ? (
+                      <div className={`flex items-center gap-1.5 text-xs ${balance.claude.available ? 'text-green-400' : 'text-red-400'}`}>
+                        {balance.claude.available ? <Wifi size={11} /> : <WifiOff size={11} />}
+                        {balance.claude.available ? 'Key valid' : 'Key invalid'}
+                      </div>
+                    ) : !provider.claudeConfigured ? (
+                      <p className="text-xs text-gray-600">Not configured</p>
+                    ) : (
+                      <p className="text-xs text-gray-500">—</p>
+                    )}
+                    <p className="text-[10px] text-gray-600">Anthropic has no public balance API</p>
+                    <a href="https://console.anthropic.com/settings/billing" target="_blank" rel="noreferrer"
+                      className="text-[10px] text-orange-500 hover:text-orange-400 flex items-center gap-0.5 transition">
+                      <ExternalLink size={9} /> View billing
+                    </a>
+                  </div>
+
+                </div>
+              )}
             </div>
 
             {/* Auto mode explanation */}

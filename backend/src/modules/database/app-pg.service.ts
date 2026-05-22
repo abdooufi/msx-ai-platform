@@ -18,9 +18,9 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
       user:     this.config.get('CHATBOOT_PG_USER', 'postgres'),
       password: this.config.get('CHATBOOT_PG_PASS', 'root'),
       database: this.config.get('CHATBOOT_PG_DB', 'Chatboot'),
-      max: 10,
+      max: 20,                        // more headroom during startup bursts
       idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 5_000,
+      connectionTimeoutMillis: 15_000, // wait longer before giving up
     });
     try {
       const c = await this.pool.connect(); c.release();
@@ -393,53 +393,76 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
 
   async getDashboardStats() {
     const since30d = new Date(Date.now() - 30 * 24 * 3600_000);
-    const [
-      convCount, msgCount, failedCount, avgLatRow, langRows, dailyRows, feedbackRow,
-    ] = await Promise.all([
-      this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM conversations`),
-      this.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM analytics_events WHERE type='message_sent'`,
-      ),
-      this.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM analytics_events WHERE type='message_failed'`,
-      ),
-      this.query<{ avg: string }>(
-        `SELECT AVG(latency_ms)::text AS avg FROM analytics_events
-         WHERE type='message_sent' AND created_at>=$1`,
-        [since30d],
-      ),
-      this.query(
-        `SELECT language AS _id, COUNT(*)::int AS count FROM analytics_events
-         WHERE type='message_sent' GROUP BY 1`,
-      ),
-      this.query(
-        `SELECT TO_CHAR(created_at,'YYYY-MM-DD') AS _id, COUNT(*)::int AS count
-         FROM analytics_events WHERE type='message_sent' AND created_at>=$1
-         GROUP BY 1 ORDER BY 1`,
-        [since30d],
-      ),
-      this.query<{ positive: string; negative: string }>(
-        `SELECT
-           COUNT(*) FILTER (WHERE msg->>'feedback' = 'positive')::text AS positive,
-           COUNT(*) FILTER (WHERE msg->>'feedback' = 'negative')::text AS negative
-         FROM conversations, jsonb_array_elements(messages::jsonb) AS msg
-         WHERE msg->>'feedback' IS NOT NULL`,
-      ),
-    ]);
 
-    const total  = parseInt(msgCount[0].count, 10);
-    const failed = parseInt(failedCount[0].count, 10);
+    // Use a single connection with a combined CTE query to avoid pool pressure at startup.
+    const rows = await this.query<any>(`
+      WITH
+        conv_cnt AS (
+          SELECT COUNT(*)::bigint AS n FROM conversations
+        ),
+        msg_cnt AS (
+          SELECT COUNT(*)::bigint AS n FROM analytics_events WHERE type='message_sent'
+        ),
+        fail_cnt AS (
+          SELECT COUNT(*)::bigint AS n FROM analytics_events WHERE type='message_failed'
+        ),
+        avg_lat AS (
+          SELECT COALESCE(AVG(latency_ms), 0)::float AS n
+          FROM analytics_events
+          WHERE type='message_sent' AND created_at >= $1
+        ),
+        lang_dist AS (
+          SELECT COALESCE(json_object_agg(_id, cnt), '{}')::text AS data
+          FROM (
+            SELECT language AS _id, COUNT(*)::int AS cnt
+            FROM analytics_events WHERE type='message_sent'
+            GROUP BY 1
+          ) x
+        ),
+        daily AS (
+          SELECT COALESCE(json_agg(row ORDER BY row->>'_id'), '[]')::text AS data
+          FROM (
+            SELECT json_build_object('_id', TO_CHAR(created_at,'YYYY-MM-DD'), 'count', COUNT(*)::int) AS row
+            FROM analytics_events WHERE type='message_sent' AND created_at >= $1
+            GROUP BY 1
+          ) x
+        ),
+        feedback AS (
+          SELECT
+            COALESCE(SUM(CASE WHEN msg->>'feedback'='positive' THEN 1 END), 0)::bigint AS pos,
+            COALESCE(SUM(CASE WHEN msg->>'feedback'='negative' THEN 1 END), 0)::bigint AS neg
+          FROM conversations c,
+               jsonb_array_elements(
+                 CASE WHEN c.messages IS NULL OR c.messages = ''
+                      THEN '[]'::jsonb
+                      ELSE c.messages::jsonb END
+               ) AS msg
+        )
+      SELECT
+        (SELECT n FROM conv_cnt)  AS conversations,
+        (SELECT n FROM msg_cnt)   AS messages,
+        (SELECT n FROM fail_cnt)  AS failed,
+        (SELECT n FROM avg_lat)   AS avg_latency,
+        (SELECT data FROM lang_dist) AS lang_breakdown,
+        (SELECT data FROM daily)     AS daily_messages,
+        (SELECT pos FROM feedback)   AS feedback_positive,
+        (SELECT neg FROM feedback)   AS feedback_negative
+    `, [since30d]);
+
+    const r      = rows[0] ?? {};
+    const total  = Number(r.messages  ?? 0);
+    const failed = Number(r.failed    ?? 0);
     return {
-      conversations: parseInt(convCount[0].count, 10),
-      messages: total,
+      conversations: Number(r.conversations ?? 0),
+      messages:      total,
       failed,
-      successRate: total > 0 ? Math.round(((total - failed) / total) * 100) : 100,
-      avgLatencyMs: Math.round(parseFloat(avgLatRow[0]?.avg ?? '0')),
-      langBreakdown: Object.fromEntries(langRows.map((r: any) => [r._id, r.count])),
-      dailyMessages: dailyRows,
+      successRate:   total > 0 ? Math.round(((total - failed) / total) * 100) : 100,
+      avgLatencyMs:  Math.round(Number(r.avg_latency ?? 0)),
+      langBreakdown: JSON.parse(r.lang_breakdown ?? '{}'),
+      dailyMessages: JSON.parse(r.daily_messages ?? '[]'),
       feedback: {
-        positive: parseInt(feedbackRow[0]?.positive ?? '0', 10),
-        negative: parseInt(feedbackRow[0]?.negative ?? '0', 10),
+        positive: Number(r.feedback_positive ?? 0),
+        negative: Number(r.feedback_negative ?? 0),
       },
     };
   }

@@ -69,7 +69,7 @@ export class ChatService {
       'طقس', 'نكتة', 'قصيدة', 'لعبة',
     ];
     if (offTopicTerms.some(t => m.includes(t))) {
-      return language === 'ar'
+      return language !== 'en'
         ? 'أنا مساعد بورصة مسقط المتخصص ولا أستطيع الإجابة على أسئلة خارج نطاق السوق المالي العُماني. يمكنني مساعدتك في أسعار الأسهم والشركات المدرجة والمؤشرات وبيانات التداول في بورصة مسقط.'
         : "I'm the MSX Stock Exchange Assistant. I can only help with questions about the Muscat Stock Exchange — stocks, companies, market data, and trading. For other topics, please use a dedicated service.";
     }
@@ -123,6 +123,30 @@ export class ChatService {
       ? await this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
       : null;
 
+    // 4a. Hard short-circuit — no RAG context AND no live data
+    //     → reply directly without calling the LLM so it cannot use training knowledge
+    const hasContext = hadResults || !!liveData;
+    if (!hasContext) {
+      const noDataReply = language !== 'en'
+        ? 'لا تتوفر لديّ معلومات كافية حول هذا الموضوع في قاعدة بياناتي. يرجى زيارة www.msx.om للحصول على أحدث المعلومات.'
+        : "I don't have enough information about this topic in my knowledge base. Please visit www.msx.om for the latest information.";
+      if (!res.headersSent) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+      }
+      res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
+      res.write(`data: ${JSON.stringify({ delta: noDataReply })}\n\n`);
+      res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs: Date.now() - start })}\n\n`);
+      res.end();
+      await this.persistMessage(sessionId, dto, {
+        response: noDataReply, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
+      });
+      return;
+    }
+
     if (liveData) {
       this.logger.log(`Live data injected for symbol: ${symbol}`);
     }
@@ -172,7 +196,7 @@ export class ChatService {
       .map(h => ({ role: h.role as 'user' | 'assistant', content: h.content }));
 
     // 6. Build system prompt with retrieved context and live data
-    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData);
+    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData, hasContext);
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
       ...historyMessages,
@@ -228,7 +252,7 @@ export class ChatService {
       fullResponse  = result.content;
     } catch (err) {
       this.logger.error(`Chat stream error: ${err.message}`);
-      fullResponse = language === 'ar'
+      fullResponse = language !== 'en'
         ? 'عذراً، حدث خطأ. يرجى المحاولة مرة أخرى.'
         : 'Sorry, an error occurred. Please try again.';
       // Send error event and close the SSE stream gracefully

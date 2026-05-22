@@ -27,8 +27,9 @@ export class ScraperProcessor {
   }
 
   @Process(CrawlJobType.CRAWL_PAGE)
-  async crawlSinglePage(job: Job<{ url: string }>) {
-    await this.processPage(job.data.url);
+  async crawlSinglePage(job: Job<{ url: string; companySymbol?: string }>) {
+    const symbol = job.data.companySymbol || this.detectSymbolFromUrl(job.data.url);
+    await this.processPage(job.data.url, symbol);
   }
 
   @Process(CrawlJobType.RECRAWL)
@@ -56,7 +57,8 @@ export class ScraperProcessor {
     this.visited.add(url);
     await job.progress(Math.round((this.visited.size / maxPages) * 100));
 
-    const links = await this.processPage(url);
+    const symbol = this.detectSymbolFromUrl(url);
+    const links = await this.processPage(url, symbol);
     const delay = parseInt(this.config.get('SCRAPER_DELAY_MS', '1000'), 10);
     await new Promise(r => setTimeout(r, delay));
 
@@ -70,7 +72,24 @@ export class ScraperProcessor {
     }
   }
 
-  private async processPage(url: string): Promise<string[]> {
+  /**
+   * Try to extract a company stock symbol from a URL path.
+   * Matches patterns like: /company/OQEP, /en/company/OQEP,
+   * /companies/OQEP, /profile/OQEP, /ticker/OQEP, /stock/OQEP
+   */
+  private detectSymbolFromUrl(url: string): string | undefined {
+    try {
+      const path = new URL(url).pathname;
+      const m = path.match(
+        /\/(?:company|companies|profile|ticker|stock|issuer|symbol)\/([A-Z]{2,8})(?:\/|$)/i,
+      );
+      return m ? m[1].toUpperCase() : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async processPage(url: string, companySymbol?: string): Promise<string[]> {
     try {
       const { data: html } = await axios.get(url, {
         timeout: 15_000,
@@ -97,7 +116,7 @@ export class ScraperProcessor {
       const langAttr = $('html').attr('lang') || '';
       const language = langAttr.includes('ar') ? 'ar' : 'en';
 
-      // Index into RAG
+      // Index into RAG — route to per-company collection when symbol is known
       await this.rag.indexContent({
         title,
         content: bodyText,
@@ -105,13 +124,17 @@ export class ScraperProcessor {
         type: KnowledgeType.WEBSITE,
         url,
         language,
+        companySymbol,
         metadata: {
-          crawledAt: new Date().toISOString(),
-          htmlLength: html.length,
+          crawledAt:    new Date().toISOString(),
+          htmlLength:   html.length,
+          companySymbol: companySymbol ?? null,
         },
       });
 
-      this.logger.debug(`✅ Indexed: ${title} (${url})`);
+      this.logger.debug(
+        `✅ Indexed: ${title} (${url})${companySymbol ? ` → ${companySymbol}` : ''}`,
+      );
       return this.extractLinks($, url);
     } catch (err) {
       this.logger.warn(`Failed to crawl ${url}: ${err.message}`);

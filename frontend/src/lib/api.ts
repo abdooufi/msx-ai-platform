@@ -140,8 +140,9 @@ export const getSettings    = ()              => api.get('/admin/settings')
 export const updateSettings = (body: object)  => api.patch('/admin/settings', body)
 
 // ─── AI Provider ──────────────────────────────────────────────────
-export const getAiProvider  = ()                   => api.get('/admin/ai-provider')
-export const setAiProvider  = (provider: string)   => api.post('/admin/ai-provider', { provider })
+export const getAiProvider        = ()                 => api.get('/admin/ai-provider')
+export const getAiProviderBalance = ()                 => api.get('/admin/ai-provider/balance')
+export const setAiProvider        = (provider: string) => api.post('/admin/ai-provider', { provider })
 
 // ─── PG Summary ───────────────────────────────────────────────────
 export const getPgSummary   = ()                   => api.get('/admin/pg/summary')
