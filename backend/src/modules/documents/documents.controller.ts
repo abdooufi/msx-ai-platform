@@ -12,7 +12,7 @@ import { DocumentsService } from './documents.service';
 @ApiTags('Documents')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('admin', 'agent')
+@Roles('super_admin', 'admin', 'editor', 'agent')
 @Controller('upload')
 export class DocumentsController {
   constructor(private readonly docs: DocumentsService) {}

@@ -18,6 +18,8 @@ export class EmbeddingService {
 
   /**
    * Generate a vector embedding for a single text string.
+   * Tries the new Ollama /api/embed endpoint first (v0.1.26+),
+   * then falls back to the legacy /api/embeddings endpoint.
    * Retries up to 3 times with exponential back-off before throwing.
    */
   async embed(text: string, retries = 3): Promise<number[]> {
@@ -25,14 +27,18 @@ export class EmbeddingService {
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        const { data } = await axios.post(
-          `${this.ollamaUrl}/api/embeddings`,
-          { model: this.model, prompt: cleanText },
-          { timeout: this.embedTimeout },
-        );
-        return data.embedding as number[];
+        return await this.callOllamaEmbed(cleanText);
       } catch (err) {
+        const status = err?.response?.status;
         const isLast = attempt === retries;
+
+        // Model not found — no point retrying, surface a clear message
+        if (status === 404) {
+          const msg = `Embedding model '${this.model}' not found in Ollama. Run: ollama pull ${this.model}`;
+          this.logger.error(msg);
+          throw new Error(msg);
+        }
+
         if (isLast) {
           this.logger.error(`Embedding failed after ${retries} attempts: ${err.message}`);
           throw new Error(`Failed to generate embedding: ${err.message}`);
@@ -44,6 +50,38 @@ export class EmbeddingService {
     }
     // unreachable — keeps TS happy
     throw new Error('Embedding failed');
+  }
+
+  /**
+   * Calls Ollama embed — tries new /api/embed first, falls back to /api/embeddings.
+   * New API (Ollama ≥0.1.26): POST /api/embed  { model, input }  → { embeddings: [[...]] }
+   * Old API (Ollama <0.1.26):  POST /api/embeddings { model, prompt } → { embedding: [...] }
+   */
+  private async callOllamaEmbed(text: string): Promise<number[]> {
+    // ── New API ──────────────────────────────────────────────────────────────
+    try {
+      const { data } = await axios.post(
+        `${this.ollamaUrl}/api/embed`,
+        { model: this.model, input: text },
+        { timeout: this.embedTimeout },
+      );
+      // New API returns { embeddings: number[][] }
+      const vec = data.embeddings?.[0] ?? data.embedding;
+      if (Array.isArray(vec) && vec.length > 0) return vec as number[];
+      throw new Error('Empty embedding in /api/embed response');
+    } catch (newErr) {
+      this.logger.debug(`/api/embed failed (${newErr.message}), trying /api/embeddings…`);
+    }
+
+    // ── Legacy API ────────────────────────────────────────────────────────────
+    const { data } = await axios.post(
+      `${this.ollamaUrl}/api/embeddings`,
+      { model: this.model, prompt: text },
+      { timeout: this.embedTimeout },
+    );
+    const vec = data.embedding;
+    if (Array.isArray(vec) && vec.length > 0) return vec as number[];
+    throw new Error('Empty embedding in /api/embeddings response');
   }
 
   /**

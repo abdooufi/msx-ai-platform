@@ -76,3 +76,24 @@
   margin-left: 2px;
 }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+/* ─── Animations ────────────────────────────────────────────────── */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-right {
+  from { opacity: 0; transform: translateX(-100%); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-slide-up    { animation: slide-up    0.2s ease-out; }
+.animate-slide-right { animation: slide-right 0.22s ease-out; }
+.animate-fade-in     { animation: fade-in     0.15s ease-out; }
+
+/* ─── Hide scrollbar but keep scroll ───────────────────────────── */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }

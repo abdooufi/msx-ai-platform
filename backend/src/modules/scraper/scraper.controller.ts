@@ -8,7 +8,7 @@ import { ScraperService } from './scraper.service';
 @ApiTags('Scraper')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('admin')
+@Roles('super_admin', 'admin', 'editor', 'agent')
 @Controller('train/website')
 export class ScraperController {
   constructor(private readonly scraper: ScraperService) {}
