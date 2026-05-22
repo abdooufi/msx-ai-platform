@@ -112,6 +112,15 @@ export const uploadDocument = (form: FormData) =>
 export const listDocuments = (page = 1) => api.get(`/upload?page=${page}`)
 export const deleteDocument = (id: string) => api.delete(`/upload/${id}`)
 
+// URL ingestion
+export const uploadFromUrl = (url: string, companySymbol?: string) =>
+  api.post('/upload/from-url', { url, companySymbol })
+
+// URL watch schedules
+export const listUrlSchedules    = ()                                              => api.get('/upload/url-schedules')
+export const addUrlSchedule      = (url: string, cron: string, companySymbol?: string) => api.post('/upload/url-schedule', { url, cron, companySymbol })
+export const deleteUrlSchedule   = (id: string)                                    => api.delete(`/upload/url-schedule/${id}`)
+
 // ─── Training ─────────────────────────────────────────────────────
 export const startCrawl        = (url?: string) => api.post('/train/website', { url })
 export const crawlPage         = (url: string)  => api.post('/train/website/page', { url })

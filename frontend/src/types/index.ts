@@ -63,7 +63,11 @@ export interface DashboardStats {
   successRate: number
   feedback: { positive: number; negative: number }
   avgLatencyMs: number
-  ragStats: { qdrantVectors: number; pgDocuments: number }
+  ragStats: {
+    qdrantVectors: number
+    pgDocuments: number
+    companyStats?: Array<{ symbol: string; collection: string; vectors: number }>
+  }
   langBreakdown: Record<string, number>
   dailyMessages: Array<{ _id: string; count: number }>
 }
@@ -76,6 +80,17 @@ export interface UploadedDoc {
   status: 'pending' | 'processing' | 'indexed' | 'failed'
   chunksIndexed: number
   tags: string[]
+  companySymbol?: string
+  createdAt: string
+}
+
+export interface UrlSchedule {
+  id: string
+  url: string
+  companySymbol?: string
+  cron: string
+  lastRunAt?: string
+  filesFound: number
   createdAt: string
 }
 

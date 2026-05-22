@@ -2,14 +2,16 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import {
-  Globe, Play, RefreshCw, CheckCircle, Loader2, Clock,
+  Globe, Play, RefreshCw, CheckCircle, Loader2,
   Map, Building2, Zap, ChevronDown, ChevronUp, Link,
   AlertCircle, CalendarClock, Power, PowerOff, Pencil,
+  Database, Layers,
 } from 'lucide-react'
 import {
   startCrawl, startSitemapCrawl, startCompanyCrawl,
   startAllCrawl, crawlPage, getCrawlStatus,
   getCrawlSchedule, setCrawlSchedule, cancelCrawlSchedule,
+  getStats,
 } from '../../../lib/api'
 import toast from 'react-hot-toast'
 
@@ -21,6 +23,12 @@ interface QueueStats {
   completed:      number
   failed:         number
   companyUrlCount: number
+}
+
+interface CompanyStat {
+  symbol:     string
+  collection: string
+  vectors:    number
 }
 
 interface ScheduleInfo {
@@ -248,20 +256,29 @@ function ScheduleCard() {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function TrainingPage() {
-  const [stats,   setStats]   = useState<QueueStats | null>(null)
-  const [results, setResults] = useState<CrawlResult[]>([])
-  const [loading, setLoading] = useState<Record<string, boolean>>({})
-  const [singleUrl, setSingleUrl] = useState('')
+  const [stats,        setStats]        = useState<QueueStats | null>(null)
+  const [companyStats, setCompanyStats] = useState<CompanyStat[]>([])
+  const [results,      setResults]      = useState<CrawlResult[]>([])
+  const [loading,      setLoading]      = useState<Record<string, boolean>>({})
+  const [singleUrl,    setSingleUrl]    = useState('')
 
   const loadStats = useCallback(async () => {
     try { setStats((await getCrawlStatus()).data) } catch {}
   }, [])
 
+  const loadCompanyStats = useCallback(async () => {
+    try {
+      const r = await getStats()
+      setCompanyStats(r.data?.ragStats?.companyStats ?? [])
+    } catch {}
+  }, [])
+
   useEffect(() => {
     loadStats()
+    loadCompanyStats()
     const t = setInterval(loadStats, 4000)
     return () => clearInterval(t)
-  }, [loadStats])
+  }, [loadStats, loadCompanyStats])
 
   const setL = (k: string, v: boolean) => setLoading(p => ({ ...p, [k]: v }))
   const addResult = (r: CrawlResult)   => setResults(p => [r, ...p].slice(0, 10))
@@ -349,7 +366,7 @@ export default function TrainingPage() {
             Crawl MSX.om pages, extract content, and index into Qdrant for AI search
           </p>
         </div>
-        <button onClick={loadStats} className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 px-2 py-1.5 bg-gray-800 rounded-lg transition">
+        <button onClick={() => { loadStats(); loadCompanyStats() }} className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 px-2 py-1.5 bg-gray-800 rounded-lg transition">
           <RefreshCw size={12} className={anyLoading ? 'animate-spin' : ''} />
           Refresh
         </button>
@@ -365,6 +382,47 @@ export default function TrainingPage() {
           <StatCard label="Co. URLs"  value={stats.companyUrlCount} color="text-teal-400"  />
         </div>
       )}
+
+      {/* Per-company Qdrant collections */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Database size={15} className="text-teal-400" />
+            <h2 className="font-semibold text-white text-sm">Per-Company Qdrant Collections</h2>
+          </div>
+          <span className="text-xs text-gray-500">
+            {companyStats.length} collection{companyStats.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+
+        {companyStats.length === 0 ? (
+          <div className="text-center py-6 text-gray-600">
+            <Layers size={28} className="mx-auto mb-2 opacity-30" />
+            <p className="text-xs">No per-company collections yet.</p>
+            <p className="text-xs mt-0.5">Upload a document with a company symbol to create one.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            {companyStats.map(c => (
+              <div key={c.collection} className="bg-gray-800/60 border border-gray-700/50 rounded-lg p-3 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-bold text-teal-300 font-mono">{c.symbol}</span>
+                  <span className="text-xs text-gray-500 bg-gray-700/60 px-1.5 py-0.5 rounded font-mono">
+                    {c.vectors.toLocaleString()}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 truncate font-mono" title={c.collection}>{c.collection}</p>
+                <div className="w-full bg-gray-700 rounded-full h-1 mt-1">
+                  <div
+                    className="bg-teal-500 h-1 rounded-full transition-all"
+                    style={{ width: `${Math.min(100, (c.vectors / Math.max(...companyStats.map(s => s.vectors), 1)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Auto-crawl schedule card */}
       <ScheduleCard />

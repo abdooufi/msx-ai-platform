@@ -26,7 +26,7 @@ export { DOCUMENTS_QUEUE } from './documents.constants';
         fileSize: parseInt(process.env.UPLOAD_MAX_SIZE_MB || '50', 10) * 1024 * 1024,
       },
       fileFilter: (_, file, cb) => {
-        const allowed = ['.pdf', '.docx', '.doc', '.xlsx', '.xls', '.csv', '.txt'];
+        const allowed = ['.pdf', '.docx', '.doc', '.xlsx', '.xls', '.csv', '.txt', '.zip'];
         const ext = extname(file.originalname).toLowerCase();
         cb(null, allowed.includes(ext));
       },

@@ -113,11 +113,9 @@ export class ChatService {
       return;
     }
 
-    // 3. Resolve symbol + RAG in parallel
-    const [ragResult, symbol] = await Promise.all([
-      this.rag.retrieve(dto.message, language),
-      this.dynamicApi.resolveSymbolWithDb(dto.message),
-    ]);
+    // 3. Detect symbol first (fast DB lookup), then retrieve RAG with company context
+    const symbol = await this.dynamicApi.resolveSymbolWithDb(dto.message);
+    const ragResult = await this.rag.retrieve(dto.message, language, symbol ?? undefined);
     const { context, sources, hadResults } = ragResult;
 
     // 4. Fetch live market data (sequential — needs symbol first)

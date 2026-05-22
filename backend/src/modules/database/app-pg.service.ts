@@ -166,6 +166,22 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
     } catch { /* already has a default or extension unavailable — harmless */ }
     // ensure session_id index
     await this.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id)`);
+    // company_symbol columns (added in v2)
+    await this.query(`ALTER TABLE knowledge_chunks     ADD COLUMN IF NOT EXISTS company_symbol VARCHAR(20)`);
+    await this.query(`ALTER TABLE uploaded_documents   ADD COLUMN IF NOT EXISTS company_symbol VARCHAR(20)`);
+    // URL watch schedules (added in v3)
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS doc_url_schedules (
+        id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        url            TEXT NOT NULL UNIQUE,
+        company_symbol VARCHAR(20),
+        cron           VARCHAR(50) NOT NULL,
+        last_run_at    TIMESTAMP,
+        files_found    INTEGER DEFAULT 0,
+        updated_at     TIMESTAMP DEFAULT NOW(),
+        created_at     TIMESTAMP DEFAULT NOW()
+      )
+    `);
     // ensure app_users admin
     await this.ensureAdminUser();
     this.logger.log('✅ AppPg migrations complete');
@@ -529,26 +545,32 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
   async upsertKnowledgeChunk(data: {
     title: string; content: string; chunkIndex: number; sourceId: string;
     type: string; url?: string; language?: string; tags?: string[];
-    qdrantId?: string; metadata?: any;
+    qdrantId?: string; metadata?: any; companySymbol?: string;
   }) {
     await this.query(
       `INSERT INTO knowledge_chunks
-         (title,content,chunk_index,source_id,type,url,language,tags,qdrant_id,is_active,last_indexed_at,metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,NOW(),$10)
+         (title,content,chunk_index,source_id,type,url,language,tags,qdrant_id,is_active,last_indexed_at,metadata,company_symbol)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,NOW(),$10,$11)
        ON CONFLICT (source_id, chunk_index) DO UPDATE SET
          title=$1, content=$2, url=$6, language=$7, tags=$8,
-         qdrant_id=$9, is_active=true, last_indexed_at=NOW(), metadata=$10, updated_at=NOW()`,
+         qdrant_id=$9, is_active=true, last_indexed_at=NOW(), metadata=$10,
+         company_symbol=$11, updated_at=NOW()`,
       [
         data.title, data.content, data.chunkIndex, data.sourceId,
         data.type, data.url ?? null, data.language ?? null,
         JSON.stringify(data.tags ?? []), data.qdrantId ?? null,
         data.metadata ? JSON.stringify(data.metadata) : '{}',
+        data.companySymbol ?? null,
       ],
     );
   }
 
   async deleteKnowledgeBySource(sourceId: string) {
     await this.query(`DELETE FROM knowledge_chunks WHERE source_id=$1`, [sourceId]);
+  }
+
+  async deleteKnowledgeByCompany(symbol: string) {
+    await this.query(`DELETE FROM knowledge_chunks WHERE company_symbol=$1`, [symbol.toUpperCase()]);
   }
 
   async countActiveKnowledge(): Promise<number> {
@@ -560,15 +582,16 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
 
   async createDocument(data: {
     originalName: string; filename: string; mimeType: string; sizeBytes: number;
-    uploadedBy?: string; tags?: string[]; description?: string;
+    uploadedBy?: string; tags?: string[]; description?: string; companySymbol?: string;
   }) {
     const rows = await this.query(
       `INSERT INTO uploaded_documents
-         (original_name,filename,mime_type,size_bytes,uploaded_by,tags,description)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+         (original_name,filename,mime_type,size_bytes,uploaded_by,tags,description,company_symbol)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [
         data.originalName, data.filename, data.mimeType, data.sizeBytes,
-        data.uploadedBy ?? null, JSON.stringify(data.tags ?? []), data.description ?? null,
+        data.uploadedBy ?? null, JSON.stringify(data.tags ?? []),
+        data.description ?? null, data.companySymbol ? data.companySymbol.toUpperCase() : null,
       ],
     );
     return rows[0] ? AppPgService.c(rows[0]) : null;
@@ -602,6 +625,55 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
 
   async deleteDocument(id: string) {
     await this.query(`DELETE FROM uploaded_documents WHERE id=$1`, [id]);
+    return { ok: true };
+  }
+
+  /** Check whether a document with this exact original filename already exists */
+  async documentExistsByName(originalName: string): Promise<boolean> {
+    const rows = await this.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM uploaded_documents WHERE original_name=$1`,
+      [originalName],
+    );
+    return parseInt(rows[0].count, 10) > 0;
+  }
+
+  // ─── URL Watch Schedules ──────────────────────────────────────────────────
+
+  async createUrlSchedule(data: {
+    id: string; url: string; companySymbol?: string; cron: string;
+  }) {
+    await this.query(
+      `INSERT INTO doc_url_schedules (id, url, company_symbol, cron)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (url) DO UPDATE SET cron=$4, company_symbol=$3, updated_at=NOW()`,
+      [data.id, data.url, data.companySymbol?.toUpperCase() ?? null, data.cron],
+    );
+  }
+
+  async listUrlSchedules() {
+    const rows = await this.query(`SELECT * FROM doc_url_schedules ORDER BY created_at DESC`);
+    return rows.map(r => AppPgService.c(r));
+  }
+
+  async getUrlScheduleById(id: string) {
+    const rows = await this.query(`SELECT * FROM doc_url_schedules WHERE id=$1`, [id]);
+    return rows[0] ? AppPgService.c(rows[0]) : null;
+  }
+
+  async getUrlScheduleByUrl(url: string) {
+    const rows = await this.query(`SELECT * FROM doc_url_schedules WHERE url=$1`, [url]);
+    return rows[0] ? AppPgService.c(rows[0]) : null;
+  }
+
+  async updateUrlScheduleRun(id: string, filesFound: number) {
+    await this.query(
+      `UPDATE doc_url_schedules SET last_run_at=NOW(), files_found=$2, updated_at=NOW() WHERE id=$1`,
+      [id, filesFound],
+    );
+  }
+
+  async deleteUrlSchedule(id: string) {
+    await this.query(`DELETE FROM doc_url_schedules WHERE id=$1`, [id]);
     return { ok: true };
   }
 }
