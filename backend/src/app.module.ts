@@ -12,10 +12,12 @@ import { AdminModule } from './modules/admin/admin.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { DatabaseModule } from './modules/database/database.module';
 import { HealthController } from './modules/health/health.controller';
+import { AppPgService } from './modules/database/app-pg.service';
 import { appConfig } from './config/app.config';
 
 @Module({
   controllers: [HealthController],
+  providers:   [AppPgService],
   imports: [
     // ─── Config ───────────────────────────────────────────────
     ConfigModule.forRoot({
@@ -53,6 +55,9 @@ import { appConfig } from './config/app.config';
         },
       }),
     }),
+
+    // ─── Health check queue access ────────────────────────────
+    BullModule.registerQueue({ name: 'scraper' }),
 
     // ─── Feature modules ──────────────────────────────────────
     AuthModule,

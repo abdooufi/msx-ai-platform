@@ -166,9 +166,21 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
     } catch { /* already has a default or extension unavailable — harmless */ }
     // ensure session_id index
     await this.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id)`);
+    // performance indices — conversations
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_conversations_created   ON conversations(created_at DESC)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_conversations_language  ON conversations(language, created_at DESC)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_conversations_channel   ON conversations(channel, created_at DESC)`);
+    // performance indices — analytics
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_analytics_session       ON analytics_events(session_id, created_at DESC)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_analytics_channel       ON analytics_events(channel, created_at DESC)`);
     // company_symbol columns (added in v2)
     await this.query(`ALTER TABLE knowledge_chunks     ADD COLUMN IF NOT EXISTS company_symbol VARCHAR(20)`);
     await this.query(`ALTER TABLE uploaded_documents   ADD COLUMN IF NOT EXISTS company_symbol VARCHAR(20)`);
+    // performance indices — knowledge & documents
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_knowledge_company       ON knowledge_chunks(company_symbol, is_active)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_knowledge_type_active   ON knowledge_chunks(type, is_active, created_at DESC)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_docs_status             ON uploaded_documents(status, created_at DESC)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_docs_company            ON uploaded_documents(company_symbol, created_at DESC)`);
     // URL watch schedules (added in v3)
     await this.query(`
       CREATE TABLE IF NOT EXISTS doc_url_schedules (

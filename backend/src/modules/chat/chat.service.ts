@@ -113,15 +113,15 @@ export class ChatService {
       return;
     }
 
-    // 3. Detect symbol first (fast DB lookup), then retrieve RAG with company context
+    // 3. Detect symbol first (fast DB lookup), then fetch RAG + live data in parallel
     const symbol = await this.dynamicApi.resolveSymbolWithDb(dto.message);
-    const ragResult = await this.rag.retrieve(dto.message, language, symbol ?? undefined);
+    const [ragResult, liveData] = await Promise.all([
+      this.rag.retrieve(dto.message, language, symbol ?? undefined),
+      symbol
+        ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
+        : Promise.resolve(null),
+    ]);
     const { context, sources, hadResults } = ragResult;
-
-    // 4. Fetch live market data (sequential — needs symbol first)
-    const liveData = symbol
-      ? await this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
-      : null;
 
     // 4a. Hard short-circuit — no RAG context AND no live data
     //     → reply directly without calling the LLM so it cannot use training knowledge
@@ -223,12 +223,12 @@ export class ChatService {
       })}\n\n`,
     );
 
-    // 8. Stream LLM response
+    // 8. Stream LLM response — fullText is buffered during streaming (no second call needed)
     let fullResponse = '';
     let tokensUsed = 0;
     let latencyMs = 0;
 
-    // For 'auto' mode: pre-resolve provider so both stream + complete use the same one
+    // For 'auto' mode: pre-resolve provider once so stream uses the same one
     let resolvedProvider: 'ollama' | 'deepseek' | 'claude' | undefined;
     const info = this.llm.getProviderInfo();
     if (info.provider === 'auto') {
@@ -236,26 +236,20 @@ export class ChatService {
     }
 
     try {
-      // Intercept the stream to capture the full response for saving
-      const { tokensUsed: t, latencyMs: l } = await this.llm.streamToResponse(
+      const { tokensUsed: t, latencyMs: l, fullText } = await this.llm.streamToResponse(
         messages,
         res,
-        { stream: true },
+        {},
         resolvedProvider,
       );
-      tokensUsed = t;
-      latencyMs = l;
-
-      // We need the full text — re-run without stream for saving
-      // (In production you'd buffer the stream instead for efficiency)
-      const result = await this.llm.complete(messages, {}, resolvedProvider);
-      fullResponse  = result.content;
+      tokensUsed   = t;
+      latencyMs    = l;
+      fullResponse = fullText;
     } catch (err) {
       this.logger.error(`Chat stream error: ${err.message}`);
       fullResponse = language !== 'en'
         ? 'عذراً، حدث خطأ. يرجى المحاولة مرة أخرى.'
         : 'Sorry, an error occurred. Please try again.';
-      // Send error event and close the SSE stream gracefully
       if (!res.writableEnded) {
         res.write(`data: ${JSON.stringify({ error: fullResponse })}\n\n`);
         res.end();

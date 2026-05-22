@@ -100,6 +100,14 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
     getSuggestions(language).then(r => setSuggestions(r.data.suggestions || []))
   }, [language])
 
+  // Auto-resize textarea as user types
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 96)}px`
+  }, [input])
+
   // Detect browser speech APIs once — after hydration, client-only
   useEffect(() => {
     setHasSpeechInput(!!getSpeechRecognition())
@@ -382,7 +390,11 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
           />
         ))}
 
-        {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
+        {/* Show typing dots while waiting for first token from the LLM */}
+        {isLoading && (() => {
+          const last = messages[messages.length - 1]
+          return !last || last.role !== 'assistant' || (!last.content && last.isStreaming)
+        })() && (
           <div className="flex gap-2 items-end">
             <BotAvatar />
             <div className="bg-gray-800 border border-gray-700 rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1.5 items-center">
@@ -515,12 +527,32 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
             <Send size={16} />
           </button>
         </div>
-        <p className="text-center text-xs text-gray-600 mt-1.5">
-          Powered by MSX AI · {isRTL ? 'اكتب / للبحث عن شركة' : 'Type / to look up a company symbol'}
-        </p>
+        <div className="flex items-center justify-between mt-1.5 px-0.5">
+          <p className="text-xs text-gray-600">
+            Powered by MSX AI · {isRTL ? 'اكتب / للبحث عن شركة' : 'Type / to look up a company symbol'}
+          </p>
+          {input.length > 200 && (
+            <span className={clsx('text-[10px] tabular-nums', input.length > 900 ? 'text-red-400' : 'text-gray-500')}>
+              {input.length}/1000
+            </span>
+          )}
+        </div>
       </div>
     </div>
   )
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────
+
+/** Format a timestamp as a short relative/absolute time label */
+function formatTime(date: Date | string): string {
+  const d   = new Date(date)
+  const now = new Date()
+  const sec = Math.floor((now.getTime() - d.getTime()) / 1000)
+  if (sec < 60)    return 'just now'
+  if (sec < 3600)  return `${Math.floor(sec / 60)}m ago`
+  if (sec < 86400) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short' })
 }
 
 // ─── History Sidebar ──────────────────────────────────────────────
@@ -779,9 +811,16 @@ function MessageBubble({
           </div>
         )}
 
+        {/* Timestamp — always visible, subtle */}
+        {!msg.isStreaming && (
+          <span className="text-[9px] text-gray-600 mt-0.5 px-0.5 select-none">
+            {formatTime(msg.createdAt)}
+          </span>
+        )}
+
         {/* Action row */}
         {!msg.isStreaming && msg.content && (
-          <div className="flex items-center gap-0.5 mt-1">
+          <div className="flex items-center gap-0.5 mt-0.5">
             {/* Copy */}
             <button
               onClick={() => onCopy(msg.id, msg.content)}

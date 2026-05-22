@@ -242,9 +242,10 @@ export class LlmService {
     messages: LlmMessage[],
     res: Response,
     opts: LlmOptions = {},
-  ): Promise<{ tokensUsed: number; latencyMs: number }> {
+  ): Promise<{ tokensUsed: number; latencyMs: number; fullText: string }> {
     const start = Date.now();
     let tokensUsed = 0;
+    let fullText   = '';
 
     const systemMsg = messages.find(m => m.role === 'system');
     const convMsgs  = messages.filter(m => m.role !== 'system');
@@ -291,6 +292,7 @@ export class LlmService {
                 const event = JSON.parse(jsonStr);
 
                 if (event.type === 'content_block_delta' && event.delta?.text) {
+                  fullText += event.delta.text;
                   res.write(`data: ${JSON.stringify({ delta: event.delta.text })}\n\n`);
                 }
                 if (event.type === 'message_delta' && event.usage) {
@@ -312,13 +314,13 @@ export class LlmService {
       const latencyMs = Date.now() - start;
       res.write(`data: ${JSON.stringify({ done: true, tokensUsed, latencyMs, provider: 'claude' })}\n\n`);
       res.end();
-      return { tokensUsed, latencyMs };
+      return { tokensUsed, latencyMs, fullText };
     } catch (err) {
       const msg = err?.response?.data?.error?.message || err.message;
       this.logger.error(`Claude stream failed: ${msg}`);
       res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
       res.end();
-      return { tokensUsed, latencyMs: Date.now() - start };
+      return { tokensUsed, latencyMs: Date.now() - start, fullText };
     }
   }
 
@@ -369,16 +371,20 @@ export class LlmService {
     }
   }
 
-  /** Server-Sent Events streaming to an Express Response */
+  /**
+   * Server-Sent Events streaming to an Express Response.
+   * Buffers the full text while streaming so callers don't need a second completion call.
+   */
   async streamToResponse(
     messages: LlmMessage[],
     res: Response,
     opts: LlmOptions = {},
     /** Optional: pre-resolved provider (e.g. from auto-routing in chat.service) */
     forceProvider?: Exclude<AiProvider, 'auto'>,
-  ): Promise<{ tokensUsed: number; latencyMs: number }> {
+  ): Promise<{ tokensUsed: number; latencyMs: number; fullText: string }> {
     const start = Date.now();
     let tokensUsed = 0;
+    let fullText   = '';
 
     // Resolve provider
     let provider: Exclude<AiProvider, 'auto'> = forceProvider ?? (
@@ -419,19 +425,22 @@ export class LlmService {
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta?.content || '';
-        if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+        if (delta) {
+          fullText += delta;
+          res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+        }
         if (chunk.usage) tokensUsed = chunk.usage.total_tokens;
       }
 
       const latencyMs = Date.now() - start;
       res.write(`data: ${JSON.stringify({ done: true, tokensUsed, latencyMs, provider })}\n\n`);
       res.end();
-      return { tokensUsed, latencyMs };
+      return { tokensUsed, latencyMs, fullText };
     } catch (err) {
       this.logger.error(`LLM stream failed [${provider}]: ${err.message}`);
       res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
       res.end();
-      return { tokensUsed, latencyMs: Date.now() - start };
+      return { tokensUsed, latencyMs: Date.now() - start, fullText };
     }
   }
 

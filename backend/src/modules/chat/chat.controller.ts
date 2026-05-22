@@ -1,6 +1,6 @@
 import {
   Controller, Post, Get, Body, Param, Query, Req, Res,
-  UseGuards, HttpCode, HttpStatus, Ip,
+  UseGuards, HttpCode, HttpStatus, Ip, Header,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
@@ -65,6 +65,7 @@ export class ChatController {
    * Quick-start suggestions shown in the chat UI.
    */
   @Get('suggestions')
+  @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=60')
   async getSuggestions(@Query('lang') lang: string = 'en') {
     const language = lang === 'ar' ? 'ar' : 'en';
     return { suggestions: await this.chatService.getSuggestions(language) };
@@ -76,6 +77,7 @@ export class ChatController {
    * No auth required. Used by the "/" trigger in the chat input.
    */
   @Get('companies')
+  @Header('Cache-Control', 'public, max-age=600, stale-while-revalidate=120')
   @ApiOperation({ summary: 'Search company symbols for chat / autocomplete (public)' })
   @ApiQuery({ name: 'q', required: false, description: 'Symbol / name filter' })
   async getCompanySymbols(@Query('q') q?: string) {

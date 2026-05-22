@@ -15,14 +15,34 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// Auto-redirect on 401
+// ── Response interceptor: auth redirect + human-readable error messages ──
 api.interceptors.response.use(
   r => r,
   err => {
-    if (err.response?.status === 401 && typeof window !== 'undefined') {
+    const status  = err.response?.status
+    const isAdmin = typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')
+
+    if (status === 401 && typeof window !== 'undefined') {
       localStorage.removeItem('msx_token')
       window.location.href = '/admin/login'
+      return Promise.reject(err)
     }
+
+    // Attach a human-readable message so UI components can show it
+    if (!err.friendlyMessage) {
+      if (status === 400)      err.friendlyMessage = err.response?.data?.message || 'Invalid request. Please check your input.'
+      else if (status === 403) err.friendlyMessage = 'You don\'t have permission to do that.'
+      else if (status === 404) err.friendlyMessage = 'Resource not found.'
+      else if (status === 409) err.friendlyMessage = 'This record already exists.'
+      else if (status === 413) err.friendlyMessage = 'File is too large.'
+      else if (status === 422) err.friendlyMessage = 'Validation failed. Please check your input.'
+      else if (status === 429) err.friendlyMessage = 'Too many requests — please wait a moment and try again.'
+      else if (status >= 500)  err.friendlyMessage = isAdmin
+        ? `Server error (${status}). Check the backend logs.`
+        : 'Something went wrong on our end. Please try again later.'
+      else if (!status)        err.friendlyMessage = 'Network error — check your connection.'
+    }
+
     return Promise.reject(err)
   },
 )
