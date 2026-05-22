@@ -187,6 +187,42 @@ export class QdrantService implements OnModuleInit {
     return stats?.points_count ?? 0;
   }
 
+  /**
+   * Scroll through all points in a collection (no query vector needed).
+   * Returns a page of raw points + a next-page offset.
+   */
+  async scroll(
+    collectionName?: string,
+    limit = 20,
+    offset?: string | null,
+    filter?: Record<string, any>,
+  ): Promise<{ points: SearchResult[]; nextOffset: string | null }> {
+    const name = collectionName ?? this.defaultCollection;
+    const body: any = { limit, with_payload: true, with_vector: false };
+    if (offset) body.offset = offset;
+    if (filter) body.filter = filter;
+    try {
+      const { data } = await axios.post(`${this.baseUrl}/collections/${name}/points/scroll`, body);
+      const points = (data.result?.points ?? []).map((p: any) => ({
+        id:      String(p.id),
+        score:   1,
+        payload: p.payload,
+      }));
+      return { points, nextOffset: data.result?.next_page_offset ?? null };
+    } catch (err: any) {
+      if (err?.response?.status === 404) return { points: [], nextOffset: null };
+      throw err;
+    }
+  }
+
+  /** Delete a single point by ID from a collection */
+  async deletePoint(id: string, collectionName?: string): Promise<void> {
+    const name = collectionName ?? this.defaultCollection;
+    await axios.post(`${this.baseUrl}/collections/${name}/points/delete`, {
+      points: [id],
+    });
+  }
+
   /** Stats for all company collections */
   async companyCollectionStats(): Promise<Array<{ symbol: string; collection: string; vectors: number }>> {
     const all = await this.listCollections();

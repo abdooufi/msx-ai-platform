@@ -11,6 +11,8 @@ import { ChatbootPgService } from './chatboot-pg.service';
 import { PgIndexingService, IndexableTable } from './pg-indexing.service';
 import { DynamicApiService } from './dynamic-api.service';
 import { LlmService, AiProvider } from '../rag/llm.service';
+import { QdrantService } from '../rag/qdrant.service';
+import { EmbeddingService } from '../rag/embedding.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../../schemas/audit-log.schema';
 
@@ -26,6 +28,8 @@ export class AdminController {
     private readonly pgIndexing: PgIndexingService,
     private readonly dynamicApi: DynamicApiService,
     private readonly llm: LlmService,
+    private readonly qdrant: QdrantService,
+    private readonly embedding: EmbeddingService,
     private readonly audit: AuditService,
   ) {}
 
@@ -530,5 +534,142 @@ export class AdminController {
   @ApiOperation({ summary: 'Ownership structure (Omani vs non-Omani)' })
   getCompanyOwnership(@Param('symbol') symbol: string) {
     return this.dynamicApi.getCompanyData('Ownership Structure', symbol);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Qdrant Admin — search, browse, manage vectors
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** GET /admin/qdrant/collections — list all collections with vector counts */
+  @Get('qdrant/collections')
+  @ApiOperation({ summary: 'List all Qdrant collections with stats' })
+  async listQdrantCollections() {
+    const names = await this.qdrant.listCollections();
+    const stats = await Promise.all(
+      names.map(async (name) => {
+        const count = await this.qdrant.count(name);
+        const raw   = await this.qdrant.getStats(name);
+        return {
+          name,
+          vectors:    count,
+          isCompany:  name.startsWith('msx_co_'),
+          symbol:     name.startsWith('msx_co_') ? name.replace('msx_co_', '').toUpperCase() : null,
+          status:     raw?.status ?? 'unknown',
+          diskBytes:  raw?.segments_count ?? 0,
+        };
+      }),
+    );
+    return stats.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** POST /admin/qdrant/search — semantic search using a text query */
+  @Post('qdrant/search')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Semantic search across Qdrant collections' })
+  async searchQdrant(
+    @Body() body: {
+      query:          string;
+      collection?:    string;
+      topK?:          number;
+      scoreThreshold?: number;
+      filterType?:    string;
+      filterLanguage?: string;
+    },
+  ) {
+    const t = Date.now();
+    const { query, collection, topK = 10, scoreThreshold = 0.2, filterType, filterLanguage } = body;
+
+    if (!query?.trim()) return { results: [], total: 0, queryMs: 0 };
+
+    // Build optional Qdrant filter
+    const must: any[] = [];
+    if (filterType)     must.push({ key: 'type',     match: { value: filterType } });
+    if (filterLanguage) must.push({ key: 'language', match: { value: filterLanguage } });
+    const filter = must.length ? { must } : undefined;
+
+    // Embed the query
+    let vector: number[];
+    try {
+      vector = await this.embedding.embed(query);
+    } catch (err) {
+      return { results: [], total: 0, queryMs: Date.now() - t, error: err.message };
+    }
+
+    // Search — either a specific collection or all collections
+    let results: any[];
+    if (collection) {
+      results = await this.qdrant.search(vector, topK, scoreThreshold, filter, collection);
+      results = results.map(r => ({ ...r, collection }));
+    } else {
+      const collections = await this.qdrant.listCollections();
+      const all = await Promise.all(
+        collections.map(c =>
+          this.qdrant.search(vector, topK, scoreThreshold, filter, c)
+            .then(rs => rs.map(r => ({ ...r, collection: c })))
+            .catch(() => []),
+        ),
+      );
+      results = all
+        .flat()
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK);
+    }
+
+    return {
+      results: results.map(r => ({
+        id:         r.id,
+        score:      Math.round(r.score * 1000) / 1000,
+        collection: r.collection,
+        payload:    r.payload,
+      })),
+      total:   results.length,
+      queryMs: Date.now() - t,
+    };
+  }
+
+  /** GET /admin/qdrant/browse — scroll/browse vectors (no query needed) */
+  @Get('qdrant/browse')
+  @ApiOperation({ summary: 'Browse (scroll) Qdrant vectors without a search query' })
+  @ApiQuery({ name: 'collection', required: false })
+  @ApiQuery({ name: 'limit',      required: false })
+  @ApiQuery({ name: 'offset',     required: false })
+  @ApiQuery({ name: 'type',       required: false })
+  async browseQdrant(
+    @Query('collection') collection?: string,
+    @Query('limit')      limit = '20',
+    @Query('offset')     offset?: string,
+    @Query('type')       type?: string,
+  ) {
+    const name   = collection ?? this.qdrant.defaultCollection;
+    const filter = type ? { must: [{ key: 'type', match: { value: type } }] } : undefined;
+    const { points, nextOffset } = await this.qdrant.scroll(
+      name, parseInt(limit), offset || null, filter,
+    );
+    return {
+      collection: name,
+      points: points.map(p => ({ id: p.id, payload: p.payload })),
+      nextOffset,
+    };
+  }
+
+  /** DELETE /admin/qdrant/point/:id — delete a single vector */
+  @Delete('qdrant/point/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a single Qdrant vector by ID' })
+  @ApiQuery({ name: 'collection', required: false })
+  async deleteQdrantPoint(
+    @Param('id') id: string,
+    @Query('collection') collection?: string,
+    @Request() req?: any,
+  ) {
+    const name = collection ?? this.qdrant.defaultCollection;
+    await this.qdrant.deletePoint(id, name);
+    if (req) {
+      await this.audit.log(AuditService.ctx(req), {
+        action: AuditAction.KB_DELETE, resource: 'qdrant_vector',
+        resourceId: id, details: `Deleted Qdrant point ${id} from ${name}`,
+      });
+    }
+    return { deleted: id, collection: name };
   }
 }

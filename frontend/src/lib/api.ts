@@ -257,6 +257,22 @@ export const getAuditLogs  = (params: {
 }
 export const getAuditStats = () => api.get('/audit/stats')
 
+// ─── Qdrant Admin ─────────────────────────────────────────────────
+export const listQdrantCollections = () => api.get('/admin/qdrant/collections')
+export const searchQdrant = (body: {
+  query: string; collection?: string; topK?: number;
+  scoreThreshold?: number; filterType?: string; filterLanguage?: string;
+}) => api.post('/admin/qdrant/search', body)
+export const browseQdrant = (collection?: string, limit = 20, offset?: string, type?: string) => {
+  const p = new URLSearchParams({ limit: String(limit) })
+  if (collection) p.set('collection', collection)
+  if (offset)     p.set('offset', offset)
+  if (type)       p.set('type', type)
+  return api.get(`/admin/qdrant/browse?${p}`)
+}
+export const deleteQdrantPoint = (id: string, collection?: string) =>
+  api.delete(`/admin/qdrant/point/${id}${collection ? `?collection=${collection}` : ''}`)
+
 // ─── Company Live Data ────────────────────────────────────────────
 export const getCompanySnapshot  = (symbol: string) => api.get(`/admin/companies/snapshot/${symbol}`)
 export const getCompanyNews      = (symbol: string) => api.get(`/admin/companies/news/${symbol}`)
