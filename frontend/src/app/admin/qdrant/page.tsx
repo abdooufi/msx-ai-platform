@@ -78,6 +78,8 @@ export default function QdrantPage() {
   // ── Collections ───────────────────────────────────────────────
   const [collections, setCollections]   = useState<Collection[]>([])
   const [colLoading,  setColLoading]    = useState(true)
+  const [colSearch,   setColSearch]     = useState('')
+  const [showAllCols, setShowAllCols]   = useState(false)
 
   // ── Search mode ───────────────────────────────────────────────
   const [mode,        setMode]          = useState<'search' | 'browse'>('search')
@@ -180,6 +182,18 @@ export default function QdrantPage() {
   }
 
   const totalVectors = collections.reduce((s, c) => s + c.vectors, 0)
+
+  const TOP_N = 5
+  const sortedCollections   = [...collections].sort((a, b) => b.vectors - a.vectors)
+  const filteredCollections = colSearch.trim()
+    ? sortedCollections.filter(c =>
+        c.name.toLowerCase().includes(colSearch.toLowerCase()) ||
+        (c.symbol ?? '').toLowerCase().includes(colSearch.toLowerCase()),
+      )
+    : sortedCollections
+  const visibleCollections  = (!colSearch.trim() && !showAllCols)
+    ? filteredCollections.slice(0, TOP_N)
+    : filteredCollections
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-6">
@@ -453,14 +467,39 @@ export default function QdrantPage() {
         {/* ── Right: collections sidebar ────────────────────── */}
         <aside className="space-y-4">
           <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            {/* Header */}
             <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
               <span className="text-sm font-semibold flex items-center gap-2">
                 <Database size={13} className="text-blue-400" />
                 Collections
               </span>
-              <span className="text-xs text-gray-500">{fmtNum(totalVectors)} total</span>
+              <span className="text-xs text-gray-500">
+                {fmtNum(totalVectors)} vectors · {collections.length} cols
+              </span>
             </div>
 
+            {/* Search box */}
+            <div className="px-3 py-2 border-b border-gray-800/60">
+              <div className="relative">
+                <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+                <input
+                  value={colSearch}
+                  onChange={e => { setColSearch(e.target.value); setShowAllCols(false) }}
+                  placeholder="Search collections…"
+                  className="w-full bg-gray-800 border border-gray-700/50 rounded-lg pl-7 pr-7 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-blue-500/60"
+                />
+                {colSearch && (
+                  <button
+                    onClick={() => setColSearch('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400 transition"
+                  >
+                    <X size={10} />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Loading skeletons */}
             {colLoading && (
               <div className="p-3 space-y-2">
                 {Array.from({ length: 3 }).map((_, i) => (
@@ -469,8 +508,9 @@ export default function QdrantPage() {
               </div>
             )}
 
-            <div className="divide-y divide-gray-800/50 max-h-[calc(100vh-240px)] overflow-y-auto">
-              {collections.map(c => {
+            {/* Collection list */}
+            <div className="divide-y divide-gray-800/50">
+              {visibleCollections.map(c => {
                 const isActive = (mode === 'search' && collection === c.name) ||
                                  (mode === 'browse' && (browseCol === c.name || (!browseCol && c.name === 'msx_knowledge')))
                 return (
@@ -481,16 +521,18 @@ export default function QdrantPage() {
                       else { setBrowseCol(c.name); setBrowsePrev([]); setBrowseOffset(undefined) }
                     }}
                     className={clsx(
-                      'w-full text-left px-4 py-2.5 transition flex items-center justify-between gap-2 group',
+                      'w-full text-left px-4 py-2.5 transition flex items-center justify-between gap-2',
                       isActive ? 'bg-blue-900/30' : 'hover:bg-gray-800/60',
                     )}
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       {c.isCompany
-                        ? <span className="text-[10px] font-bold text-teal-400 font-mono bg-teal-900/30 px-1.5 py-0.5 rounded border border-teal-700/40">{c.symbol}</span>
+                        ? <span className="text-[10px] font-bold text-teal-400 font-mono bg-teal-900/30 px-1.5 py-0.5 rounded border border-teal-700/40 flex-shrink-0">
+                            {c.symbol}
+                          </span>
                         : <Database size={12} className="text-blue-400 flex-shrink-0" />
                       }
-                      <span className="text-xs text-gray-300 truncate">{c.isCompany ? c.name : c.name}</span>
+                      <span className="text-xs text-gray-300 truncate">{c.name}</span>
                     </div>
                     <span className="text-[10px] text-gray-500 font-mono flex-shrink-0 tabular-nums">
                       {fmtNum(c.vectors)}
@@ -500,6 +542,27 @@ export default function QdrantPage() {
               })}
             </div>
 
+            {/* Show more / less */}
+            {!colSearch.trim() && filteredCollections.length > TOP_N && (
+              <button
+                onClick={() => setShowAllCols(v => !v)}
+                className="w-full px-4 py-2 text-xs text-gray-500 hover:text-gray-300 border-t border-gray-800/50 transition flex items-center justify-center gap-1.5"
+              >
+                {showAllCols
+                  ? <><ChevronLeft size={11} className="rotate-90" /> Show top {TOP_N} only</>
+                  : <>Show {filteredCollections.length - TOP_N} more collections</>
+                }
+              </button>
+            )}
+
+            {/* Search no-results */}
+            {colSearch.trim() && filteredCollections.length === 0 && !colLoading && (
+              <div className="px-4 py-5 text-center text-xs text-gray-600">
+                No collections matching &ldquo;{colSearch}&rdquo;
+              </div>
+            )}
+
+            {/* Empty state */}
             {collections.length === 0 && !colLoading && (
               <div className="px-4 py-6 text-center text-xs text-gray-600">No collections found</div>
             )}
@@ -509,9 +572,9 @@ export default function QdrantPage() {
           <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-4 space-y-2">
             <p className="text-xs font-semibold text-gray-400">Tips</p>
             <ul className="text-[11px] text-gray-500 space-y-1.5 leading-relaxed">
+              <li>• Top 5 by vector count shown — search to find others</li>
               <li>• Click a collection to filter search to it</li>
-              <li>• Lower the threshold (0.2–0.4) to find more results</li>
-              <li>• Switch to Browse to see raw vectors without a query</li>
+              <li>• Lower threshold (0.2–0.4) to find more results</li>
               <li>• Company collections are named <code className="text-teal-400">msx_co_*</code></li>
             </ul>
           </div>

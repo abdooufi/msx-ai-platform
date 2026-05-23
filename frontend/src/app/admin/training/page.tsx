@@ -5,13 +5,13 @@ import {
   Globe, Play, RefreshCw, CheckCircle, Loader2,
   Map, Building2, Zap, ChevronDown, ChevronUp, Link,
   AlertCircle, CalendarClock, Power, PowerOff, Pencil,
-  Database, Layers,
+  Database, Layers, Search, X,
 } from 'lucide-react'
 import {
   startCrawl, startSitemapCrawl, startCompanyCrawl,
   startAllCrawl, crawlPage, getCrawlStatus,
   getCrawlSchedule, setCrawlSchedule, cancelCrawlSchedule,
-  getStats,
+  getStats, getPgCompanies,
 } from '../../../lib/api'
 import toast from 'react-hot-toast'
 
@@ -258,6 +258,8 @@ function ScheduleCard() {
 export default function TrainingPage() {
   const [stats,        setStats]        = useState<QueueStats | null>(null)
   const [companyStats, setCompanyStats] = useState<CompanyStat[]>([])
+  const [allCompanies, setAllCompanies] = useState<any[]>([])
+  const [coSearch,     setCoSearch]     = useState('')
   const [results,      setResults]      = useState<CrawlResult[]>([])
   const [loading,      setLoading]      = useState<Record<string, boolean>>({})
   const [singleUrl,    setSingleUrl]    = useState('')
@@ -268,8 +270,12 @@ export default function TrainingPage() {
 
   const loadCompanyStats = useCallback(async () => {
     try {
-      const r = await getStats()
-      setCompanyStats(r.data?.ragStats?.companyStats ?? [])
+      const [statsRes, companiesRes] = await Promise.all([
+        getStats(),
+        getPgCompanies(1, 500),
+      ])
+      setCompanyStats(statsRes.data?.ragStats?.companyStats ?? [])
+      setAllCompanies(companiesRes.data?.data ?? companiesRes.data?.items ?? [])
     } catch {}
   }, [])
 
@@ -283,6 +289,34 @@ export default function TrainingPage() {
   const setL = (k: string, v: boolean) => setLoading(p => ({ ...p, [k]: v }))
   const addResult = (r: CrawlResult)   => setResults(p => [r, ...p].slice(0, 10))
   const anyLoading = Object.values(loading).some(Boolean)
+
+  // ── Merged company list (DB companies + Qdrant stats) ────────────────
+  const qdrantBySymbol: Record<string, CompanyStat> = {}
+  companyStats.forEach(c => { qdrantBySymbol[c.symbol.toUpperCase()] = c })
+
+  type MergedCo = { symbol: string; name: string; collection: string; vectors: number; indexed: boolean }
+  const mergedCompanies: MergedCo[] = allCompanies.map((co: any) => {
+    const sym  = (co.symbol ?? '').toUpperCase()
+    const stat = qdrantBySymbol[sym]
+    return {
+      symbol:     sym,
+      name:       co.long_name_en ?? co.short_name_en ?? sym,
+      collection: stat ? stat.collection : `msx_co_${sym.toLowerCase()}`,
+      vectors:    stat ? stat.vectors : 0,
+      indexed:    !!stat,
+    }
+  })
+  companyStats.forEach(c => {
+    if (!mergedCompanies.some(m => m.symbol === c.symbol.toUpperCase())) {
+      mergedCompanies.push({ symbol: c.symbol, name: c.symbol, collection: c.collection, vectors: c.vectors, indexed: true })
+    }
+  })
+  const maxVec        = mergedCompanies.reduce((m, c) => c.vectors > m ? c.vectors : m, 1)
+  const indexedCount  = mergedCompanies.filter(c => c.indexed).length
+  const coSearchLower = coSearch.trim().toLowerCase()
+  const filteredCompanies = coSearchLower
+    ? mergedCompanies.filter(c => c.symbol.toLowerCase().includes(coSearchLower) || c.name.toLowerCase().includes(coSearchLower))
+    : mergedCompanies
 
   const handleSitemap = async () => {
     setL('sitemap', true)
@@ -385,37 +419,70 @@ export default function TrainingPage() {
 
       {/* Per-company Qdrant collections */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-        <div className="flex items-center justify-between mb-4">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <Database size={15} className="text-teal-400" />
             <h2 className="font-semibold text-white text-sm">Per-Company Qdrant Collections</h2>
           </div>
-          <span className="text-xs text-gray-500">
-            {companyStats.length} collection{companyStats.length !== 1 ? 's' : ''}
-          </span>
+          <div className="flex items-center gap-3 ml-auto">
+            <span className="text-xs text-gray-500">
+              <span className="text-teal-400 font-medium">{indexedCount}</span> indexed
+              {' / '}
+              <span className="text-white font-medium">{mergedCompanies.length}</span> total
+            </span>
+            {/* Search */}
+            <div className="relative">
+              <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+              <input
+                value={coSearch}
+                onChange={e => setCoSearch(e.target.value)}
+                placeholder="Search…"
+                className="bg-gray-800 border border-gray-700/50 rounded-lg pl-7 pr-7 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-teal-500/60 w-36"
+              />
+              {coSearch && (
+                <button onClick={() => setCoSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400 transition">
+                  <X size={10} />
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
-        {companyStats.length === 0 ? (
+        {filteredCompanies.length === 0 ? (
           <div className="text-center py-6 text-gray-600">
             <Layers size={28} className="mx-auto mb-2 opacity-30" />
-            <p className="text-xs">No per-company collections yet.</p>
-            <p className="text-xs mt-0.5">Upload a document with a company symbol to create one.</p>
+            {coSearch
+              ? <p className="text-xs">No companies matching &ldquo;{coSearch}&rdquo;</p>
+              : <><p className="text-xs">No companies found.</p><p className="text-xs mt-0.5">Add companies in the Companies page first.</p></>
+            }
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-            {companyStats.map(c => (
-              <div key={c.collection} className="bg-gray-800/60 border border-gray-700/50 rounded-lg p-3 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold text-teal-300 font-mono">{c.symbol}</span>
-                  <span className="text-xs text-gray-500 bg-gray-700/60 px-1.5 py-0.5 rounded font-mono">
-                    {c.vectors.toLocaleString()}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5">
+            {filteredCompanies.map(c => (
+              <div
+                key={c.symbol}
+                className={`border rounded-lg p-3 space-y-1 ${
+                  c.indexed
+                    ? 'bg-gray-800/60 border-gray-700/50'
+                    : 'bg-gray-800/20 border-gray-800 opacity-60'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className={`text-sm font-bold font-mono ${c.indexed ? 'text-teal-300' : 'text-gray-500'}`}>
+                    {c.symbol}
+                  </span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0 ${
+                    c.indexed ? 'text-gray-400 bg-gray-700/60' : 'text-gray-600 bg-gray-800'
+                  }`}>
+                    {c.vectors > 0 ? c.vectors.toLocaleString() : '—'}
                   </span>
                 </div>
-                <p className="text-xs text-gray-600 truncate font-mono" title={c.collection}>{c.collection}</p>
-                <div className="w-full bg-gray-700 rounded-full h-1 mt-1">
+                <p className="text-[10px] text-gray-500 truncate leading-tight" title={c.name}>{c.name}</p>
+                <div className="w-full bg-gray-700 rounded-full h-0.5 mt-1">
                   <div
-                    className="bg-teal-500 h-1 rounded-full transition-all"
-                    style={{ width: `${Math.min(100, (c.vectors / Math.max(...companyStats.map(s => s.vectors), 1)) * 100)}%` }}
+                    className={`h-0.5 rounded-full transition-all ${c.indexed ? 'bg-teal-500' : 'bg-gray-600'}`}
+                    style={{ width: c.vectors > 0 ? `${Math.min(100, (c.vectors / maxVec) * 100)}%` : '0%' }}
                   />
                 </div>
               </div>

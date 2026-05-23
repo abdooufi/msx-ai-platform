@@ -513,9 +513,9 @@ export class AdminController {
   }
 
   @Get('companies/dividends/:symbol')
-  @ApiOperation({ summary: 'Dividend distribution history' })
+  @ApiOperation({ summary: 'Dividend distribution history (scraped from snapshot.aspx)' })
   getCompanyDividends(@Param('symbol') symbol: string) {
-    return this.dynamicApi.getCompanyData('Dividend Distribution', symbol);
+    return this.dynamicApi.getDividends(symbol);
   }
 
   @Get('companies/financial/:symbol')

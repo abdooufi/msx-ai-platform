@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import * as cheerio from 'cheerio';
 import Redis from 'ioredis';
 import { ChatbootPgService } from './chatboot-pg.service';
 
@@ -864,59 +865,247 @@ export class DynamicApiService implements OnModuleInit, OnModuleDestroy {
     return this.callEndpoint(ep, symbol);
   }
 
-  // ─── Board members transformer ────────────────────────────────────────────
+  // ─── snapshot.aspx HTML scraping ─────────────────────────────────────────
 
   /**
-   * Fetch board/profile data from BODMembersSnap.aspx and normalise it into
-   * a flat array of { role, nameEn, nameAr } objects that the frontend can
-   * display generically.
-   *
-   * BODMembersSnap returns an array where the first element is the company
-   * profile record (ChairmanEn/Ar, DeputyEn/Ar, MemberNameEn/Ar, etc.).
+   * Fetch the full company snapshot HTML page (cached 1 h).
+   * URL: https://www.msx.om/snapshot.aspx?s={symbol}
    */
-  async getBoardMembers(symbol: string): Promise<{ role: string; nameEn: string; nameAr: string }[]> {
-    const raw = await this.getCompanyData('Board of Directors', symbol);
-    const rec = Array.isArray(raw) ? (raw[0] ?? {}) : (raw ?? {});
+  private async scrapeSnapshotPage(symbol: string): Promise<string | null> {
+    const url      = `${BASE}/snapshot.aspx?s=${encodeURIComponent(symbol.toLowerCase())}`;
+    const cacheKey = `msx:html:${symbol.toUpperCase()}`;
 
-    const ROLES: Array<[string, string, string]> = [
-      // [displayRole, EnField, ArField]
-      ['Chairman',                 'ChairmanEn',             'ChairmanAr'],
-      ['Deputy',                   'DeputyEn',               'DeputyAr'],
-      ['Secretary',                'SecretaryEn',            'SecretaryAr'],
-      ['Members',                  'MembersEn',              'MembersAr'],
-      ['Executive President',      'ExecutivePresidentEn',   'ExecutivePresidentAr'],
-      ['Deputy Exec. President',   'DeputyExecutivePresidentEn', 'DeputyExecutivePresidentAr'],
-      ['Managing Director',        'ManagingDirectorEn',     'ManagingDirectorAr'],
-      ['Internal Auditor',         'InternalAuditorAr',      'InternalAuditorAr'],
-      ['Legal Advisor',            'LegalAdvisorEn',         'LegalAdvisorAr'],
-      ['Auditor',                  'AuditorEn',              'AuditorAr'],
-    ];
-
-    // Also include individual member rows (when endpoint returns multiple rows)
-    const members = Array.isArray(raw) ? raw : [];
-    const result: { role: string; nameEn: string; nameAr: string }[] = [];
-
-    // Named roles from the first record
-    for (const [role, enField, arField] of ROLES) {
-      const nameEn = String(rec[enField] ?? '').trim();
-      const nameAr = String(rec[arField] ?? '').trim();
-      if (nameEn || nameAr) {
-        result.push({ role, nameEn, nameAr });
-      }
+    if (this.redis) {
+      try {
+        const cached = await this.redis.get(cacheKey);
+        if (cached) return cached;
+      } catch {}
     }
 
-    // Additional member rows (some companies return each board member as a separate array element)
-    for (let i = 1; i < members.length; i++) {
-      const m = members[i];
-      const nameEn = String(m.MemberNameEn ?? m.NameEn ?? m.ExecutivePresidentEn ?? '').trim();
-      const nameAr = String(m.MemberNameAr ?? m.NameAr ?? '').trim();
-      const role   = String(m.IndependentEn ?? m.ExecutiveEn ?? m.ShareholderEn ?? 'Member').trim();
-      if (nameEn || nameAr) {
-        result.push({ role, nameEn, nameAr });
+    try {
+      const { data } = await axios.get(url, {
+        headers: {
+          'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+          'Referer':         'https://www.msx.om/',
+        },
+        timeout: 15_000,
+        responseType: 'text',
+      });
+
+      const html = typeof data === 'string' ? data : null;
+      if (html && html.length > 500 && this.redis) {
+        try { await this.redis.set(cacheKey, html, 'EX', 3600); } catch {}
       }
+      return html;
+    } catch (err: any) {
+      this.logger.warn(`snapshot.aspx scrape failed [${symbol}]: ${err.message}`);
+      return null;
+    }
+  }
+
+  /** True if string contains Arabic characters */
+  private isArabic(s: string): boolean {
+    return /[؀-ۿ]/.test(s);
+  }
+
+  // ─── Board members ────────────────────────────────────────────────────────
+
+  /**
+   * Parse <div class="bord_information"> from snapshot.aspx.
+   * Tries multiple DOM shapes: table rows, list items, or raw text.
+   */
+  private async getBoardMembersFromHtml(
+    symbol: string,
+  ): Promise<{ role: string; nameEn: string; nameAr: string }[]> {
+    const html = await this.scrapeSnapshotPage(symbol);
+    if (!html) return [];
+
+    const $        = cheerio.load(html);
+    const boardDiv = $('.bord_information').first();
+    if (!boardDiv.length) {
+      this.logger.debug(`bord_information div not found for ${symbol}`);
+      return [];
+    }
+
+    const result: { role: string; nameEn: string; nameAr: string }[] = [];
+
+    // ── Strategy 1: table rows ──────────────────────────────────────────
+    boardDiv.find('table tr').each((_, tr) => {
+      const cells: string[] = [];
+      $(tr).find('td').each((_, td) => {
+        const t = $(td).text().replace(/\s+/g, ' ').trim();
+        if (t) cells.push(t);
+      });
+      if (!cells.length) return;
+
+      let nameEn = '';
+      let nameAr = '';
+      let role   = '';
+
+      if (cells.length >= 3) {
+        // Common layouts:
+        //   [nameAr, roleAr, nameEn]  or  [nameEn, nameAr, role]
+        for (const c of cells) {
+          if (this.isArabic(c)) {
+            if (!nameAr)      nameAr = c;
+            else if (!role)   role   = c;
+          } else {
+            if (!nameEn)      nameEn = c;
+            else if (!role)   role   = c;
+          }
+        }
+      } else if (cells.length === 2) {
+        if (this.isArabic(cells[0])) { nameAr = cells[0]; nameEn = cells[1]; }
+        else                          { nameEn = cells[0]; nameAr = cells[1]; }
+      } else {
+        if (this.isArabic(cells[0])) nameAr = cells[0];
+        else                          nameEn = cells[0];
+      }
+
+      if (nameEn || nameAr) result.push({ role, nameEn, nameAr });
+    });
+
+    if (result.length) return result;
+
+    // ── Strategy 2: list / card items ───────────────────────────────────
+    boardDiv
+      .find('li, [class*="member"], [class*="director"], [class*="bod"]')
+      .each((_, el) => {
+        const nameEl = $(el).find('[class*="name"], strong, b').first();
+        const roleEl = $(el).find('[class*="role"], [class*="pos"], span').first();
+        const nameText = (nameEl.length ? nameEl : $(el)).text().replace(/\s+/g, ' ').trim();
+        const roleText = roleEl.length ? roleEl.text().trim() : '';
+        if (!nameText) return;
+        result.push({
+          role:   roleText,
+          nameEn: this.isArabic(nameText) ? '' : nameText,
+          nameAr: this.isArabic(nameText) ? nameText : '',
+        });
+      });
+
+    if (result.length) return result;
+
+    // ── Strategy 3: raw text block ───────────────────────────────────────
+    const rawText = boardDiv.text().replace(/\s+/g, ' ').trim();
+    if (rawText.length > 3) {
+      result.push({ role: '', nameEn: rawText, nameAr: '' });
     }
 
     return result;
+  }
+
+  /**
+   * Public entry point — HTML scrape first, JSON API fallback.
+   */
+  async getBoardMembers(symbol: string): Promise<{ role: string; nameEn: string; nameAr: string }[]> {
+    // 1. Scrape snapshot.aspx → <div class="bord_information">
+    const htmlResult = await this.getBoardMembersFromHtml(symbol);
+    if (htmlResult.length) return htmlResult;
+
+    this.logger.debug(`Board HTML scrape returned nothing for ${symbol}, falling back to JSON API`);
+
+    // 2. Fallback: BODMembersSnap.aspx JSON API
+    try {
+      const raw = await this.getCompanyData('Board of Directors', symbol);
+      const rec = Array.isArray(raw) ? (raw[0] ?? {}) : (raw ?? {});
+
+      const ROLES: Array<[string, string, string]> = [
+        ['Chairman',              'ChairmanEn',                 'ChairmanAr'],
+        ['Deputy',                'DeputyEn',                   'DeputyAr'],
+        ['Secretary',             'SecretaryEn',                'SecretaryAr'],
+        ['Members',               'MembersEn',                  'MembersAr'],
+        ['Executive President',   'ExecutivePresidentEn',       'ExecutivePresidentAr'],
+        ['Deputy Exec. President','DeputyExecutivePresidentEn', 'DeputyExecutivePresidentAr'],
+        ['Managing Director',     'ManagingDirectorEn',         'ManagingDirectorAr'],
+        ['Internal Auditor',      'InternalAuditorEn',          'InternalAuditorAr'],
+        ['Legal Advisor',         'LegalAdvisorEn',             'LegalAdvisorAr'],
+        ['Auditor',               'AuditorEn',                  'AuditorAr'],
+      ];
+
+      const result: { role: string; nameEn: string; nameAr: string }[] = [];
+
+      for (const [role, enField, arField] of ROLES) {
+        const nameEn = String(rec[enField] ?? '').trim();
+        const nameAr = String(rec[arField] ?? '').trim();
+        if (nameEn || nameAr) result.push({ role, nameEn, nameAr });
+      }
+
+      const members = Array.isArray(raw) ? raw : [];
+      for (let i = 1; i < members.length; i++) {
+        const m = members[i];
+        const nameEn = String(m.MemberNameEn ?? m.NameEn ?? m.ExecutivePresidentEn ?? '').trim();
+        const nameAr = String(m.MemberNameAr ?? m.NameAr ?? '').trim();
+        const role   = String(m.IndependentEn ?? m.ExecutiveEn ?? m.ShareholderEn ?? 'Member').trim();
+        if (nameEn || nameAr) result.push({ role, nameEn, nameAr });
+      }
+
+      return result;
+    } catch (err: any) {
+      this.logger.warn(`Board JSON API fallback failed [${symbol}]: ${err.message}`);
+      return [];
+    }
+  }
+
+  // ─── Dividends ────────────────────────────────────────────────────────────
+
+  /**
+   * Parse the Kendo grid <div class="kendo-grid" id="sustainabilityreports-grid-Dividend-Reports">
+   * from snapshot.aspx — returns an array of plain row objects keyed by column header.
+   */
+  private async getDividendsFromHtml(symbol: string): Promise<any[]> {
+    const html = await this.scrapeSnapshotPage(symbol);
+    if (!html) return [];
+
+    const $ = cheerio.load(html);
+
+    // The grid container may appear as a child of another element
+    const gridEl = $('[id="sustainabilityreports-grid-Dividend-Reports"]').first();
+    if (!gridEl.length) {
+      this.logger.debug(`Dividend grid not found in snapshot.aspx for ${symbol}`);
+      return [];
+    }
+
+    const headers: string[] = [];
+    const rows: any[]       = [];
+
+    // Column headers
+    gridEl.find('thead th, thead td').each((_, th) => {
+      headers.push($(th).text().replace(/\s+/g, ' ').trim());
+    });
+
+    // Data rows
+    gridEl.find('tbody tr').each((_, tr) => {
+      const cells: string[] = [];
+      $(tr).find('td').each((_, td) => {
+        cells.push($(td).text().replace(/\s+/g, ' ').trim());
+      });
+      if (!cells.some(Boolean)) return;
+      const obj: Record<string, string> = {};
+      cells.forEach((c, i) => { obj[headers[i] ?? `col${i + 1}`] = c; });
+      rows.push(obj);
+    });
+
+    return rows;
+  }
+
+  /**
+   * Public entry — HTML scrape first, JSON API fallback.
+   */
+  async getDividends(symbol: string): Promise<any[]> {
+    const htmlRows = await this.getDividendsFromHtml(symbol);
+    if (htmlRows.length) return htmlRows;
+
+    this.logger.debug(`Dividend HTML scrape returned nothing for ${symbol}, falling back to JSON API`);
+
+    try {
+      const raw = await this.getCompanyData('Dividend Distribution', symbol);
+      return Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    } catch (err: any) {
+      this.logger.warn(`Dividend JSON API fallback failed [${symbol}]: ${err.message}`);
+      return [];
+    }
   }
 
   // ─── Company data by category ────────────────────────────────────────────
