@@ -273,6 +273,29 @@ export const browseQdrant = (collection?: string, limit = 20, offset?: string, t
 export const deleteQdrantPoint = (id: string, collection?: string) =>
   api.delete(`/admin/qdrant/point/${id}${collection ? `?collection=${collection}` : ''}`)
 
+// ─── Qdrant Snapshots ─────────────────────────────────────────────
+/** Create a snapshot for all collections (omit collection) or one.
+ *  Uses a longer timeout (3 min) because snapshotting all collections can be slow. */
+export const createQdrantSnapshot      = (collection?: string) =>
+  api.post(
+    `/admin/qdrant/snapshot${collection ? `?collection=${encodeURIComponent(collection)}` : ''}`,
+    undefined,
+    { timeout: 180_000 },
+  )
+
+/** List all snapshots for a specific collection */
+export const listQdrantSnapshots       = (collection: string) =>
+  api.get(`/admin/qdrant/snapshots/${encodeURIComponent(collection)}`)
+
+/** Delete a named snapshot from a collection */
+export const deleteQdrantSnapshot      = (collection: string, name: string) =>
+  api.delete(`/admin/qdrant/snapshot/${encodeURIComponent(collection)}/${encodeURIComponent(name)}`)
+
+// ─── Qdrant Snapshot Schedule (via scraper queue) ─────────────────
+export const getQdrantSnapshotSchedule    = ()             => api.get('/train/website/snapshot-schedule')
+export const setQdrantSnapshotSchedule    = (cron: string) => api.post('/train/website/snapshot-schedule', { cron })
+export const cancelQdrantSnapshotSchedule = ()             => api.delete('/train/website/snapshot-schedule')
+
 // ─── Company Live Data ────────────────────────────────────────────
 export const getCompanySnapshot  = (symbol: string) => api.get(`/admin/companies/snapshot/${symbol}`)
 export const getCompanyNews      = (symbol: string) => api.get(`/admin/companies/news/${symbol}`)

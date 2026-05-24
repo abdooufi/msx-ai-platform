@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { RagService } from '../rag/rag.service';
+import { QdrantService } from '../rag/qdrant.service';
 import { KnowledgeType } from '../../schemas/knowledge.schema';
 import { SCRAPER_QUEUE, CrawlJobType } from './scraper.constants';
 
@@ -15,6 +16,7 @@ export class ScraperProcessor {
 
   constructor(
     private rag: RagService,
+    private qdrant: QdrantService,
     private config: ConfigService,
   ) {}
 
@@ -161,6 +163,15 @@ export class ScraperProcessor {
     });
 
     return [...new Set(links)];
+  }
+
+  @Process(CrawlJobType.QDRANT_SNAPSHOT)
+  async qdrantSnapshot(_job: Job) {
+    this.logger.log('Scheduled Qdrant snapshot started...');
+    const results = await this.qdrant.createSnapshot();
+    const ok  = results.filter(r => !r.error).length;
+    const bad = results.filter(r =>  r.error).length;
+    this.logger.log(`Qdrant snapshot done: ${ok} ok, ${bad} failed`);
   }
 
   @OnQueueFailed()

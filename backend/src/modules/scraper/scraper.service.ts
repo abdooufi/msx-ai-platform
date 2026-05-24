@@ -275,4 +275,45 @@ export class ScraperService {
     const hours = parseInt(this.config.get('SCRAPER_RECRAWL_HOURS', '24'), 10);
     await this.setSchedule(`0 */${hours} * * *`);
   }
+
+  // ─── Qdrant snapshot schedule ─────────────────────────────────────────────
+
+  private readonly SNAPSHOT_JOB_ID = 'qdrant-snapshot';
+
+  async getSnapshotScheduleInfo(): Promise<{ active: boolean; cron?: string; nextRunAt?: string }> {
+    try {
+      const jobs = await this.scraperQueue.getRepeatableJobs();
+      const job  = jobs.find(j => j.id === this.SNAPSHOT_JOB_ID || j.name === CrawlJobType.QDRANT_SNAPSHOT);
+      if (!job) return { active: false };
+      return {
+        active:    true,
+        cron:      job.cron,
+        nextRunAt: job.next ? new Date(job.next).toISOString() : undefined,
+      };
+    } catch {
+      return { active: false };
+    }
+  }
+
+  async cancelSnapshotSchedule(): Promise<void> {
+    const jobs = await this.scraperQueue.getRepeatableJobs().catch(() => []);
+    for (const job of jobs) {
+      if (job.id === this.SNAPSHOT_JOB_ID || job.name === CrawlJobType.QDRANT_SNAPSHOT) {
+        await this.scraperQueue.removeRepeatableByKey(job.key).catch(() => {});
+        this.logger.log(`Qdrant snapshot schedule cancelled`);
+      }
+    }
+  }
+
+  async setSnapshotSchedule(cron: string): Promise<{ active: boolean; cron: string; nextRunAt?: string }> {
+    await this.cancelSnapshotSchedule();
+    await this.scraperQueue.add(
+      CrawlJobType.QDRANT_SNAPSHOT,
+      {},
+      { repeat: { cron }, jobId: this.SNAPSHOT_JOB_ID },
+    );
+    this.logger.log(`Qdrant snapshot schedule set: "${cron}"`);
+    const info = await this.getSnapshotScheduleInfo();
+    return { active: true, cron, nextRunAt: info.nextRunAt };
+  }
 }

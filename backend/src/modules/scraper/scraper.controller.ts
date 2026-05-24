@@ -91,4 +91,27 @@ export class ScraperController {
   async crawlAll(@Body() body: { url?: string }) {
     return this.scraper.startAllCrawl(body?.url);
   }
+
+  // ── Qdrant snapshot schedule ────────────────────────────────────────────
+
+  @Get('snapshot-schedule')
+  @ApiOperation({ summary: 'Get current Qdrant snapshot schedule' })
+  async getSnapshotSchedule() {
+    return this.scraper.getSnapshotScheduleInfo();
+  }
+
+  @Post('snapshot-schedule')
+  @ApiOperation({ summary: 'Set (or replace) the Qdrant auto-snapshot cron schedule' })
+  @ApiBody({ schema: { properties: { cron: { type: 'string', example: '0 3 * * *' } } } })
+  async setSnapshotSchedule(@Body() body: { cron: string }) {
+    if (!body?.cron) throw new Error('cron expression required');
+    return this.scraper.setSnapshotSchedule(body.cron);
+  }
+
+  @Delete('snapshot-schedule')
+  @ApiOperation({ summary: 'Cancel the Qdrant snapshot schedule' })
+  async cancelSnapshotSchedule() {
+    await this.scraper.cancelSnapshotSchedule();
+    return { active: false };
+  }
 }

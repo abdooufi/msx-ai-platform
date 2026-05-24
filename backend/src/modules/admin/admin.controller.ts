@@ -1,6 +1,6 @@
 import {
   Controller, Get, Post, Put, Patch, Delete,
-  Body, Param, Query, UseGuards, HttpCode, HttpStatus, Request,
+  Body, Param, Query, UseGuards, HttpCode, HttpStatus, Request, OnModuleInit,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -21,7 +21,7 @@ import { AuditAction } from '../../schemas/audit-log.schema';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('admin', 'agent', 'super_admin', 'editor')
 @Controller('admin')
-export class AdminController {
+export class AdminController implements OnModuleInit {
   constructor(
     private readonly admin: AdminService,
     private readonly pg: ChatbootPgService,
@@ -32,6 +32,19 @@ export class AdminController {
     private readonly embedding: EmbeddingService,
     private readonly audit: AuditService,
   ) {}
+
+  /** Restore persisted AI provider on startup */
+  async onModuleInit() {
+    try {
+      const rows = await this.pg.getSystemSettings();
+      const row  = (rows as any[]).find(r => r.key === 'ai_provider');
+      if (row?.value) {
+        try {
+          this.llm.setProvider(row.value as AiProvider);
+        } catch { /* ignore if key not configured */ }
+      }
+    } catch { /* non-fatal */ }
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   // MongoDB / NestJS stats
@@ -83,9 +96,11 @@ export class AdminController {
   }
 
   @Post('ai-provider')
-  @ApiOperation({ summary: 'Switch AI provider at runtime (no restart needed)' })
+  @ApiOperation({ summary: 'Switch AI provider at runtime and persist selection' })
   async setAiProvider(@Body() body: { provider: AiProvider }, @Request() req) {
     const result = await this.llm.setProvider(body.provider);
+    // Persist so it survives a backend restart
+    await this.pg.upsertSystemSetting('ai_provider', body.provider).catch(() => {});
     await this.audit.log(AuditService.ctx(req), {
       action: AuditAction.AI_PROVIDER_CHANGE, resource: 'settings',
       details: `Switched AI provider to ${body.provider}`,
@@ -671,5 +686,50 @@ export class AdminController {
       });
     }
     return { deleted: id, collection: name };
+  }
+
+  // ── Qdrant snapshots ──────────────────────────────────────────────────────
+
+  /** POST /admin/qdrant/snapshot  — create snapshot for all or one collection */
+  @Post('qdrant/snapshot')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Create Qdrant snapshot (all collections or one)' })
+  @ApiQuery({ name: 'collection', required: false })
+  async createQdrantSnapshot(@Query('collection') collection?: string, @Request() req?: any) {
+    const results = await this.qdrant.createSnapshot(collection || undefined);
+    if (req) {
+      await this.audit.log(AuditService.ctx(req), {
+        action: AuditAction.SETTINGS_UPDATE, resource: 'qdrant_snapshot',
+        details: `Manual snapshot: ${collection || 'all collections'}`,
+      });
+    }
+    return { snapshots: results, total: results.length };
+  }
+
+  /** GET /admin/qdrant/snapshots/:collection — list snapshots for one collection */
+  @Get('qdrant/snapshots/:collection')
+  @ApiOperation({ summary: 'List Qdrant snapshots for a collection' })
+  async listQdrantSnapshots(@Param('collection') collection: string) {
+    const list = await this.qdrant.listSnapshots(collection);
+    return { collection, snapshots: list };
+  }
+
+  /** DELETE /admin/qdrant/snapshot/:collection/:name — delete a named snapshot */
+  @Delete('qdrant/snapshot/:collection/:name')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a named Qdrant snapshot' })
+  async deleteQdrantSnapshot(
+    @Param('collection') collection: string,
+    @Param('name') name: string,
+    @Request() req?: any,
+  ) {
+    await this.qdrant.deleteSnapshot(collection, name);
+    if (req) {
+      await this.audit.log(AuditService.ctx(req), {
+        action: AuditAction.KB_DELETE, resource: 'qdrant_snapshot',
+        details: `Deleted snapshot ${name} from ${collection}`,
+      });
+    }
+    return { deleted: name, collection };
   }
 }

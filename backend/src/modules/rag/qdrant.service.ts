@@ -29,7 +29,12 @@ export class QdrantService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    await this.ensureCollection();
+    try {
+      await this.ensureCollection();
+    } catch (err: any) {
+      // Non-fatal: log and continue so app.listen() is never blocked
+      this.logger.error(`Qdrant init failed (non-fatal): ${err?.message}`);
+    }
   }
 
   // ─── Collection management ────────────────────────────────────────
@@ -42,8 +47,9 @@ export class QdrantService implements OnModuleInit {
   /** Create a Qdrant collection if it doesn't already exist */
   async ensureCollection(collectionName?: string): Promise<void> {
     const name = collectionName ?? this.defaultCollection;
+    const TIMEOUT_MS = 10_000; // 10 s — prevent hanging forever if Qdrant is slow
     try {
-      const res = await axios.get(`${this.baseUrl}/collections/${name}`);
+      const res = await axios.get(`${this.baseUrl}/collections/${name}`, { timeout: TIMEOUT_MS });
       if (res.data?.result) {
         this.logger.log(`✅ Qdrant collection "${name}" exists`);
         return;
@@ -54,9 +60,11 @@ export class QdrantService implements OnModuleInit {
       }
     }
     try {
-      await axios.put(`${this.baseUrl}/collections/${name}`, {
-        vectors: { size: this.vectorSize, distance: 'Cosine' },
-      });
+      await axios.put(
+        `${this.baseUrl}/collections/${name}`,
+        { vectors: { size: this.vectorSize, distance: 'Cosine' } },
+        { timeout: TIMEOUT_MS },
+      );
       this.logger.log(`✅ Created Qdrant collection "${name}"`);
     } catch (err: any) {
       if (err?.response?.status === 409) {
@@ -235,5 +243,68 @@ export class QdrantService implements OnModuleInit {
       })),
     );
     return stats.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }
+
+  // ─── Snapshot management ──────────────────────────────────────────────────
+
+  /**
+   * Create a snapshot for one collection (or all collections if omitted).
+   * Returns an array of { collection, snapshot } or { collection, error }.
+   */
+  async createSnapshot(collectionName?: string): Promise<any[]> {
+    const targets = collectionName
+      ? [collectionName]
+      : await this.listCollections();
+
+    const results: any[] = [];
+
+    // Process in batches of 5 to avoid overwhelming Qdrant,
+    // with a per-collection timeout so one slow snapshot can't block forever.
+    const BATCH = 5;
+    const TIMEOUT_MS = 60_000; // 60 s per collection
+    for (let i = 0; i < targets.length; i += BATCH) {
+      const batch = targets.slice(i, i + BATCH);
+      const batchResults = await Promise.all(
+        batch.map(async (name) => {
+          try {
+            const { data } = await axios.post(
+              `${this.baseUrl}/collections/${name}/snapshots`,
+              undefined,
+              { timeout: TIMEOUT_MS },
+            );
+            return { collection: name, snapshot: data.result };
+          } catch (err: any) {
+            this.logger.warn(`Snapshot failed for "${name}": ${err?.message}`);
+            return { collection: name, error: err?.message };
+          }
+        }),
+      );
+      results.push(...batchResults);
+    }
+
+    const ok  = results.filter(r => !r.error).length;
+    const bad = results.filter(r =>  r.error).length;
+    this.logger.log(`Snapshots done: ${ok} ok, ${bad} failed (${results.length} total)`);
+    return results;
+  }
+
+  /** List all snapshots for a collection */
+  async listSnapshots(collectionName: string): Promise<any[]> {
+    try {
+      const { data } = await axios.get(
+        `${this.baseUrl}/collections/${collectionName}/snapshots`,
+      );
+      return data.result ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Delete a named snapshot from a collection */
+  async deleteSnapshot(collectionName: string, snapshotName: string): Promise<void> {
+    await axios.delete(
+      `${this.baseUrl}/collections/${collectionName}/snapshots/${encodeURIComponent(snapshotName)}`,
+    );
+    this.logger.log(`Deleted snapshot "${snapshotName}" from "${collectionName}"`);
   }
 }

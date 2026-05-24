@@ -3,11 +3,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Search, Database, Trash2, RefreshCw, ChevronRight, ChevronLeft,
-  ExternalLink, Filter, SlidersHorizontal, Layers, X, AlertCircle,
+  ExternalLink, SlidersHorizontal, Layers, X, AlertCircle,
   Globe, FileText, HelpCircle, Building2, BookOpen,
+  Camera, Clock, CalendarClock, Check, ChevronDown, ChevronUp,
 } from 'lucide-react'
 import {
   listQdrantCollections, searchQdrant, browseQdrant, deleteQdrantPoint,
+  createQdrantSnapshot, listQdrantSnapshots, deleteQdrantSnapshot,
+  getQdrantSnapshotSchedule, setQdrantSnapshotSchedule, cancelQdrantSnapshotSchedule,
 } from '../../../lib/api'
 import clsx from 'clsx'
 
@@ -109,6 +112,24 @@ export default function QdrantPage() {
   const [expanded,    setExpanded]      = useState<string | null>(null)
   const [deleting,    setDeleting]      = useState<string | null>(null)
 
+  // ── Snapshots ─────────────────────────────────────────────────
+  const [snapshotOpen,      setSnapshotOpen]      = useState(false)
+  const [snapshotTarget,    setSnapshotTarget]    = useState('')   // '' = all
+  const [snapshotting,      setSnapshotting]      = useState(false)
+  const [snapshotMsg,       setSnapshotMsg]       = useState('')
+  const [snapList,          setSnapList]          = useState<any[]>([])
+  const [snapListCol,       setSnapListCol]       = useState('')
+  const [snapListLoading,   setSnapListLoading]   = useState(false)
+  const [deletingSnap,      setDeletingSnap]      = useState<string | null>(null)
+
+  // Schedule
+  const [schedOpen,         setSchedOpen]         = useState(false)
+  const [schedInfo,         setSchedInfo]         = useState<{ active: boolean; cron?: string; nextRunAt?: string } | null>(null)
+  const [schedLoading,      setSchedLoading]      = useState(false)
+  const [customCron,        setCustomCron]        = useState('')
+  const [schedSaving,       setSchedSaving]       = useState(false)
+  const [schedMsg,          setSchedMsg]          = useState('')
+
   // ── Load collections ──────────────────────────────────────────
   const loadCollections = useCallback(async () => {
     setColLoading(true)
@@ -178,6 +199,93 @@ export default function QdrantPage() {
       alert(err.friendlyMessage || 'Delete failed')
     } finally {
       setDeleting(null)
+    }
+  }
+
+  // ── Snapshot handlers ─────────────────────────────────────────
+  const handleCreateSnapshot = useCallback(async () => {
+    setSnapshotting(true); setSnapshotMsg('')
+    try {
+      const r = await createQdrantSnapshot(snapshotTarget || undefined)
+      const { total, snapshots } = r.data
+      const failed = (snapshots as any[]).filter(s => s.error).length
+      setSnapshotMsg(failed
+        ? `⚠️ ${total - failed}/${total} snapshot(s) created — ${failed} failed`
+        : `✅ ${total} snapshot(s) created successfully`)
+      // Refresh list if we're viewing that collection
+      if (snapListCol) loadSnapList(snapListCol)
+    } catch (e: any) {
+      setSnapshotMsg(`❌ ${e.friendlyMessage || e.message || 'Snapshot failed'}`)
+    } finally {
+      setSnapshotting(false)
+    }
+  }, [snapshotTarget, snapListCol])
+
+  const loadSnapList = useCallback(async (col: string) => {
+    if (!col) return
+    setSnapListLoading(true); setSnapList([])
+    try {
+      const r = await listQdrantSnapshots(col)
+      setSnapList(r.data.snapshots || [])
+    } catch { setSnapList([]) }
+    finally { setSnapListLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    if (snapshotOpen && snapListCol) loadSnapList(snapListCol)
+  }, [snapshotOpen, snapListCol, loadSnapList])
+
+  const handleDeleteSnap = async (col: string, name: string) => {
+    if (!confirm(`Delete snapshot "${name}"?`)) return
+    setDeletingSnap(name)
+    try {
+      await deleteQdrantSnapshot(col, name)
+      setSnapList(prev => prev.filter(s => s.name !== name))
+    } catch (e: any) {
+      alert(e.friendlyMessage || 'Delete failed')
+    } finally {
+      setDeletingSnap(null)
+    }
+  }
+
+  const loadSchedule = useCallback(async () => {
+    setSchedLoading(true)
+    try {
+      const r = await getQdrantSnapshotSchedule()
+      setSchedInfo(r.data)
+      if (r.data?.cron) setCustomCron(r.data.cron)
+    } catch { setSchedInfo({ active: false }) }
+    finally { setSchedLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    if (schedOpen) loadSchedule()
+  }, [schedOpen, loadSchedule])
+
+  const handleSetSchedule = async (cron: string) => {
+    setSchedSaving(true); setSchedMsg('')
+    try {
+      const r = await setQdrantSnapshotSchedule(cron)
+      setSchedInfo(r.data)
+      setCustomCron(r.data.cron || cron)
+      setSchedMsg('✅ Schedule saved')
+    } catch (e: any) {
+      setSchedMsg(`❌ ${e.friendlyMessage || 'Failed to save schedule'}`)
+    } finally {
+      setSchedSaving(false)
+    }
+  }
+
+  const handleCancelSchedule = async () => {
+    setSchedSaving(true); setSchedMsg('')
+    try {
+      await cancelQdrantSnapshotSchedule()
+      setSchedInfo({ active: false })
+      setSchedMsg('✅ Schedule cancelled')
+    } catch (e: any) {
+      setSchedMsg(`❌ ${e.friendlyMessage || 'Failed to cancel'}`)
+    } finally {
+      setSchedSaving(false)
     }
   }
 
@@ -577,6 +685,210 @@ export default function QdrantPage() {
               <li>• Lower threshold (0.2–0.4) to find more results</li>
               <li>• Company collections are named <code className="text-teal-400">msx_co_*</code></li>
             </ul>
+          </div>
+
+          {/* ── Snapshots card ───────────────────────────────── */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            {/* Header / toggle */}
+            <button
+              onClick={() => setSnapshotOpen(v => !v)}
+              className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition"
+            >
+              <span className="text-sm font-semibold flex items-center gap-2">
+                <Camera size={13} className="text-purple-400" />
+                Snapshots
+              </span>
+              {snapshotOpen ? <ChevronUp size={13} className="text-gray-500" /> : <ChevronDown size={13} className="text-gray-500" />}
+            </button>
+
+            {snapshotOpen && (
+              <div className="border-t border-gray-800 p-4 space-y-4">
+                {/* Create snapshot */}
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-wide text-gray-500 font-semibold">Create Snapshot</p>
+                  <select
+                    value={snapshotTarget}
+                    onChange={e => setSnapshotTarget(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-purple-500/60"
+                  >
+                    <option value="">All collections</option>
+                    {collections.map(c => (
+                      <option key={c.name} value={c.name}>{c.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={handleCreateSnapshot}
+                    disabled={snapshotting}
+                    className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-purple-700 hover:bg-purple-600 disabled:bg-gray-700 disabled:text-gray-500 text-white text-xs rounded-lg font-medium transition"
+                  >
+                    {snapshotting
+                      ? <><RefreshCw size={12} className="animate-spin" /> Creating…</>
+                      : <><Camera size={12} /> Snapshot Now</>
+                    }
+                  </button>
+                  {snapshotMsg && (
+                    <p className="text-[11px] text-gray-400 leading-relaxed">{snapshotMsg}</p>
+                  )}
+                </div>
+
+                {/* List snapshots for a collection */}
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-wide text-gray-500 font-semibold">Browse Snapshots</p>
+                  <select
+                    value={snapListCol}
+                    onChange={e => { setSnapListCol(e.target.value); if (e.target.value) loadSnapList(e.target.value) }}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-purple-500/60"
+                  >
+                    <option value="">— pick a collection —</option>
+                    {collections.map(c => (
+                      <option key={c.name} value={c.name}>{c.name}</option>
+                    ))}
+                  </select>
+
+                  {snapListLoading && (
+                    <div className="space-y-1.5">
+                      {[1, 2].map(i => <div key={i} className="h-8 bg-gray-800 rounded animate-pulse" />)}
+                    </div>
+                  )}
+
+                  {!snapListLoading && snapListCol && snapList.length === 0 && (
+                    <p className="text-[11px] text-gray-600 text-center py-2">No snapshots yet</p>
+                  )}
+
+                  {snapList.map(s => (
+                    <div key={s.name} className="flex items-center justify-between bg-gray-800/60 rounded-lg px-3 py-2 gap-2">
+                      <div className="min-w-0">
+                        <p className="text-[11px] text-gray-300 font-mono truncate">{s.name}</p>
+                        {s.creation_time && (
+                          <p className="text-[10px] text-gray-600 mt-0.5">
+                            {new Date(s.creation_time).toLocaleString()}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleDeleteSnap(snapListCol, s.name)}
+                        disabled={deletingSnap === s.name}
+                        className="flex-shrink-0 p-1 rounded text-gray-600 hover:text-red-400 hover:bg-red-900/20 transition"
+                        title="Delete snapshot"
+                      >
+                        {deletingSnap === s.name
+                          ? <RefreshCw size={11} className="animate-spin" />
+                          : <Trash2 size={11} />
+                        }
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── Auto-schedule card ───────────────────────────── */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            {/* Header / toggle */}
+            <button
+              onClick={() => setSchedOpen(v => !v)}
+              className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition"
+            >
+              <span className="text-sm font-semibold flex items-center gap-2">
+                <CalendarClock size={13} className={schedInfo?.active ? 'text-green-400' : 'text-gray-500'} />
+                Auto-Snapshot
+                {schedInfo?.active && (
+                  <span className="px-1.5 py-0.5 bg-green-900/40 text-green-400 border border-green-700/40 rounded text-[9px] font-bold uppercase">On</span>
+                )}
+              </span>
+              {schedOpen ? <ChevronUp size={13} className="text-gray-500" /> : <ChevronDown size={13} className="text-gray-500" />}
+            </button>
+
+            {schedOpen && (
+              <div className="border-t border-gray-800 p-4 space-y-3">
+                {schedLoading ? (
+                  <div className="h-8 bg-gray-800 rounded animate-pulse" />
+                ) : (
+                  <>
+                    {/* Current status */}
+                    {schedInfo?.active ? (
+                      <div className="flex items-start gap-2 bg-green-900/20 border border-green-800/40 rounded-lg px-3 py-2">
+                        <Check size={12} className="text-green-400 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <p className="text-xs text-green-300 font-mono">{schedInfo.cron}</p>
+                          {schedInfo.nextRunAt && (
+                            <p className="text-[10px] text-green-600 mt-0.5">
+                              Next: {new Date(schedInfo.nextRunAt).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-gray-600 italic">No schedule active</p>
+                    )}
+
+                    {/* Presets */}
+                    <div className="space-y-1">
+                      <p className="text-[10px] uppercase tracking-wide text-gray-600 font-semibold">Quick presets</p>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {[
+                          { label: 'Daily 3am',   cron: '0 3 * * *'   },
+                          { label: 'Weekly Sun',  cron: '0 3 * * 0'   },
+                          { label: 'Every 12h',   cron: '0 */12 * * *' },
+                          { label: 'Monthly 1st', cron: '0 3 1 * *'   },
+                        ].map(p => (
+                          <button
+                            key={p.cron}
+                            onClick={() => { setCustomCron(p.cron); handleSetSchedule(p.cron) }}
+                            disabled={schedSaving}
+                            className={clsx(
+                              'px-2 py-1.5 rounded-lg text-[11px] border transition text-left',
+                              schedInfo?.cron === p.cron
+                                ? 'border-green-600/60 bg-green-900/30 text-green-300'
+                                : 'border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600',
+                            )}
+                          >
+                            <span className="block font-medium">{p.label}</span>
+                            <span className="font-mono text-[9px] text-gray-600">{p.cron}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Custom cron */}
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-wide text-gray-600 font-semibold">Custom cron</p>
+                      <div className="flex gap-1.5">
+                        <input
+                          value={customCron}
+                          onChange={e => setCustomCron(e.target.value)}
+                          placeholder="0 3 * * *"
+                          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-purple-500/60 placeholder-gray-700"
+                        />
+                        <button
+                          onClick={() => handleSetSchedule(customCron)}
+                          disabled={schedSaving || !customCron.trim()}
+                          className="px-2.5 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:bg-gray-700 disabled:text-gray-500 text-white text-xs rounded-lg transition"
+                        >
+                          {schedSaving ? <RefreshCw size={11} className="animate-spin" /> : 'Set'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Cancel button */}
+                    {schedInfo?.active && (
+                      <button
+                        onClick={handleCancelSchedule}
+                        disabled={schedSaving}
+                        className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-red-400 border border-red-900/40 hover:bg-red-900/20 rounded-lg transition"
+                      >
+                        <X size={11} /> Cancel Schedule
+                      </button>
+                    )}
+
+                    {schedMsg && (
+                      <p className="text-[11px] text-gray-400">{schedMsg}</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </aside>
       </div>
