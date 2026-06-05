@@ -1,10 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { EmbeddingService } from './embedding.service';
 import { QdrantService, SearchResult } from './qdrant.service';
 import { AppPgService } from '../database/app-pg.service';
 import { KnowledgeType } from '../../schemas/knowledge.schema';
-import { v4 as uuidv4 } from 'uuid';
 
 export interface IndexInput {
   title:          string;
@@ -23,6 +23,8 @@ export interface RagContext {
   context:    string;
   sources:    Array<{ title: string; url: string; content: string; score: number; type: string }>;
   hadResults: boolean;
+  /** Highest relevance score among returned chunks (0 if no results) */
+  topScore:   number;
 }
 
 @Injectable()
@@ -36,10 +38,22 @@ export class RagService {
     private config:    ConfigService,
   ) {}
 
+  // ─── Deterministic chunk ID ───────────────────────────────────────────────
+  /**
+   * Generate a deterministic UUID-shaped ID for a chunk so that
+   * re-indexing the same content is a true upsert (no duplicates).
+   * Format: first 32 hex chars of SHA-256("sourceId:chunkIndex") split as 8-4-4-4-12.
+   */
+  private chunkId(sourceId: string, chunkIndex: number): string {
+    const h = createHash('sha256').update(`${sourceId}:${chunkIndex}`).digest('hex');
+    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+  }
+
   /**
    * Index a piece of text into Qdrant + PostgreSQL.
-   * When `companySymbol` is provided the vectors go into a per-company
-   * collection (msx_co_{symbol}). Otherwise they land in msx_knowledge.
+   * Chunk IDs are deterministic so repeated indexing of the same source
+   * produces true upserts instead of duplicates.
+   * When `companySymbol` is provided vectors go into msx_co_{symbol}.
    */
   async indexContent(input: IndexInput): Promise<number> {
     const chunkSize = parseInt(this.config.get('RAG_CHUNK_SIZE', '512'), 10);
@@ -53,10 +67,14 @@ export class RagService {
       this.logger.log(`Indexing "${input.title}" → collection ${targetCollection}`);
     }
 
+    const embeddingModel = this.embedding.model;
+    const indexedAt      = new Date().toISOString();
+
     let indexed = 0;
     for (let i = 0; i < chunks.length; i++) {
       const chunk    = chunks[i];
-      const qdrantId = uuidv4();
+      // Deterministic ID — same source+chunk always gets same ID (true upsert)
+      const qdrantId = this.chunkId(input.sourceId, i);
       const textToEmbed = `${input.title}\n\n${chunk}`;
 
       try {
@@ -66,15 +84,17 @@ export class RagService {
           id:      qdrantId,
           vector,
           payload: {
-            title:         input.title,
-            content:       chunk,
-            sourceId:      input.sourceId,
-            type:          input.type,
-            url:           input.url || '',
-            language:      input.language || 'en',
-            chunkIndex:    i,
-            tags:          input.tags || [],
-            companySymbol: input.companySymbol || null,
+            title:          input.title,
+            content:        chunk,
+            sourceId:       input.sourceId,
+            type:           input.type,
+            url:            input.url || '',
+            language:       input.language || 'en',
+            chunkIndex:     i,
+            tags:           input.tags || [],
+            companySymbol:  input.companySymbol || null,
+            embeddingModel, // Feature #3: model version tracking
+            indexedAt,      // Feature #13: freshness tracking
             ...input.metadata,
           },
         }], targetCollection);
@@ -89,7 +109,7 @@ export class RagService {
           language:      input.language,
           tags:          input.tags,
           qdrantId,
-          metadata:      input.metadata,
+          metadata:      { ...input.metadata, embeddingModel, indexedAt },
           companySymbol: input.companySymbol,
         });
 
@@ -111,10 +131,16 @@ export class RagService {
    *     then also search msx_knowledge for complementary context.
    *     Results are merged and re-ranked by score.
    *   – Without a symbol → search only msx_knowledge (existing behaviour).
+   *
+   * Feature #11: Language-weighted scoring — chunks matching the query language
+   *   receive a small boost so same-language results rank higher.
+   *
+   * Feature #1: topScore is returned so the caller can enforce a hard threshold.
    */
   async retrieve(query: string, language?: string, companySymbol?: string): Promise<RagContext> {
-    const topK      = parseInt(this.config.get('RAG_TOP_K', '5'), 10);
-    const threshold = parseFloat(this.config.get('RAG_SCORE_THRESHOLD', '0.4'));
+    const topK          = parseInt(this.config.get('RAG_TOP_K', '5'), 10);
+    const threshold     = parseFloat(this.config.get('RAG_SCORE_THRESHOLD', '0.4'));
+    const langBoost     = parseFloat(this.config.get('RAG_LANG_BOOST', '0.05')); // Feature #11
 
     try {
       const queryVector = await this.embedding.embed(query);
@@ -127,7 +153,6 @@ export class RagService {
 
       if (companySymbol) {
         const companyCol = QdrantService.companyCollection(companySymbol);
-        // Search company collection + general, merge
         results = await this.qdrant.searchMultiple(
           queryVector,
           [companyCol, this.qdrant.defaultCollection],
@@ -140,7 +165,28 @@ export class RagService {
         results = await this.qdrant.search(queryVector, topK, threshold, filter);
       }
 
-      if (!results.length) return { context: '', sources: [], hadResults: false };
+      if (!results.length) return { context: '', sources: [], hadResults: false, topScore: 0 };
+
+      // Feature #11: Apply language score boost for matching-language chunks
+      if (language && language !== 'mixed') {
+        results = results.map(r => ({
+          ...r,
+          score: r.payload.language === language ? r.score + langBoost : r.score,
+        }));
+        // Re-sort after boosting
+        results.sort((a, b) => b.score - a.score);
+      }
+
+      // Feature #3: Log embedding model mismatch warnings
+      const currentModel = this.embedding.model;
+      for (const r of results) {
+        if (r.payload.embeddingModel && r.payload.embeddingModel !== currentModel) {
+          this.logger.warn(
+            `⚠️ Embedding model mismatch: stored="${r.payload.embeddingModel}" current="${currentModel}" — consider re-indexing`,
+          );
+          break; // warn once per query
+        }
+      }
 
       // Deduplicate by sourceId (keep highest-scoring chunk)
       const seen = new Map<string, SearchResult>();
@@ -149,6 +195,8 @@ export class RagService {
         if (!seen.has(sid) || seen.get(sid)!.score < r.score) seen.set(sid, r);
       }
       const deduped = [...seen.values()].sort((a, b) => b.score - a.score);
+
+      const topScore = deduped[0]?.score ?? 0; // Feature #1
 
       const sources = deduped.map(r => ({
         title:   r.payload.title || '',
@@ -162,10 +210,10 @@ export class RagService {
         .map((s, i) => `[${i + 1}] ${s.title}\nSource: ${s.url || 'internal'}\n${s.content}`)
         .join('\n\n---\n\n');
 
-      return { context, sources, hadResults: true };
+      return { context, sources, hadResults: true, topScore };
     } catch (err) {
       this.logger.error(`RAG retrieval failed: ${err.message}`);
-      return { context: '', sources: [], hadResults: false };
+      return { context: '', sources: [], hadResults: false, topScore: 0 };
     }
   }
 

@@ -6,12 +6,15 @@ import {
   ExternalLink, SlidersHorizontal, Layers, X, AlertCircle,
   Globe, FileText, HelpCircle, Building2, BookOpen,
   Camera, Clock, CalendarClock, Check, ChevronDown, ChevronUp,
+  ShieldAlert, FlaskConical, CheckCircle2, XCircle, Zap,
 } from 'lucide-react'
 import {
   listQdrantCollections, searchQdrant, browseQdrant, deleteQdrantPoint,
   createQdrantSnapshot, listQdrantSnapshots, deleteQdrantSnapshot,
   getQdrantSnapshotSchedule, setQdrantSnapshotSchedule, cancelQdrantSnapshotSchedule,
+  deleteAllQdrantData, testRagQuery,
 } from '../../../lib/api'
+import { useAuthStore } from '../../../lib/store'
 import clsx from 'clsx'
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -78,11 +81,20 @@ function fmtNum(n: number) {
 // ─── Main Page ───────────────────────────────────────────────────
 
 export default function QdrantPage() {
+  const { user } = useAuthStore()
+  const isSuperAdmin = user?.role === 'super_admin'
+
   // ── Collections ───────────────────────────────────────────────
   const [collections, setCollections]   = useState<Collection[]>([])
   const [colLoading,  setColLoading]    = useState(true)
   const [colSearch,   setColSearch]     = useState('')
   const [showAllCols, setShowAllCols]   = useState(false)
+
+  // ── Delete all (super_admin) ──────────────────────────────────
+  const [deleteAllOpen,      setDeleteAllOpen]      = useState(false)
+  const [deleteAllConfirm,   setDeleteAllConfirm]   = useState('')
+  const [deletingAll,        setDeletingAll]        = useState(false)
+  const [deleteAllMsg,       setDeleteAllMsg]       = useState('')
 
   // ── Search mode ───────────────────────────────────────────────
   const [mode,        setMode]          = useState<'search' | 'browse'>('search')
@@ -129,6 +141,33 @@ export default function QdrantPage() {
   const [customCron,        setCustomCron]        = useState('')
   const [schedSaving,       setSchedSaving]       = useState(false)
   const [schedMsg,          setSchedMsg]          = useState('')
+
+  // ── RAG Test Query (Feature #9) ──────────────────────────────
+  const [testOpen,        setTestOpen]       = useState(false)
+  const [testQuery,       setTestQuery]      = useState('')
+  const [testLang,        setTestLang]       = useState('en')
+  const [testSymbol,      setTestSymbol]     = useState('')
+  const [testLoading,     setTestLoading]    = useState(false)
+  const [testResult,      setTestResult]     = useState<any>(null)
+  const [testError,       setTestError]      = useState('')
+
+  const handleTestQuery = async (e?: React.FormEvent) => {
+    e?.preventDefault()
+    if (!testQuery.trim()) return
+    setTestLoading(true); setTestError(''); setTestResult(null)
+    try {
+      const r = await testRagQuery({
+        query:          testQuery.trim(),
+        language:       testLang,
+        companySymbol:  testSymbol.trim() || undefined,
+      })
+      setTestResult(r.data)
+    } catch (err: any) {
+      setTestError(err.friendlyMessage || err.message || 'Test query failed')
+    } finally {
+      setTestLoading(false)
+    }
+  }
 
   // ── Load collections ──────────────────────────────────────────
   const loadCollections = useCallback(async () => {
@@ -286,6 +325,24 @@ export default function QdrantPage() {
       setSchedMsg(`❌ ${e.friendlyMessage || 'Failed to cancel'}`)
     } finally {
       setSchedSaving(false)
+    }
+  }
+
+  const handleDeleteAll = async () => {
+    if (deleteAllConfirm !== 'DELETE') return
+    setDeletingAll(true); setDeleteAllMsg('')
+    try {
+      const r = await deleteAllQdrantData()
+      const { deleted, failed, total } = r.data
+      setDeleteAllMsg(failed
+        ? `⚠️ ${deleted}/${total} collections deleted — ${failed} failed`
+        : `✅ All ${deleted} collections deleted`)
+      setDeleteAllConfirm('')
+      await loadCollections()
+    } catch (e: any) {
+      setDeleteAllMsg(`❌ ${e.friendlyMessage || e.message || 'Delete failed'}`)
+    } finally {
+      setDeletingAll(false)
     }
   }
 
@@ -890,7 +947,200 @@ export default function QdrantPage() {
               </div>
             )}
           </div>
+          {/* ── Danger Zone (super_admin only) ───────────────── */}
+          {isSuperAdmin && (
+            <div className="bg-red-950/30 border border-red-800/50 rounded-xl overflow-hidden">
+              {/* Header / toggle */}
+              <button
+                onClick={() => { setDeleteAllOpen(v => !v); setDeleteAllMsg(''); setDeleteAllConfirm('') }}
+                className="w-full px-4 py-3 flex items-center justify-between hover:bg-red-900/20 transition"
+              >
+                <span className="text-sm font-semibold flex items-center gap-2 text-red-400">
+                  <ShieldAlert size={13} />
+                  Danger Zone
+                </span>
+                {deleteAllOpen ? <ChevronUp size={13} className="text-red-600" /> : <ChevronDown size={13} className="text-red-600" />}
+              </button>
+
+              {deleteAllOpen && (
+                <div className="border-t border-red-800/40 p-4 space-y-3">
+                  <p className="text-[11px] text-red-300/80 leading-relaxed">
+                    Permanently delete <span className="font-bold text-red-300">all {collections.length} collections</span> and
+                    every vector inside them. This cannot be undone.
+                  </p>
+
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] text-red-500 uppercase tracking-wide font-semibold">
+                      Type <span className="font-mono text-red-300">DELETE</span> to confirm
+                    </p>
+                    <input
+                      value={deleteAllConfirm}
+                      onChange={e => setDeleteAllConfirm(e.target.value)}
+                      placeholder="DELETE"
+                      className="w-full bg-red-950/40 border border-red-800/60 rounded-lg px-3 py-2 text-sm font-mono text-red-200 placeholder-red-900 focus:outline-none focus:border-red-500"
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleDeleteAll}
+                    disabled={deletingAll || deleteAllConfirm !== 'DELETE'}
+                    className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-red-700 hover:bg-red-600 disabled:bg-red-950 disabled:text-red-800 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg transition"
+                  >
+                    {deletingAll
+                      ? <><RefreshCw size={12} className="animate-spin" /> Deleting…</>
+                      : <><Trash2 size={12} /> Delete All Collections</>
+                    }
+                  </button>
+
+                  {deleteAllMsg && (
+                    <p className="text-[11px] text-red-300 leading-relaxed">{deleteAllMsg}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </aside>
+      </div>
+
+      {/* ── RAG Debug / Test Query Panel ──────────────────────── */}
+      <div className="mt-6 border border-gray-800 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setTestOpen(v => !v)}
+          className="w-full flex items-center gap-2 px-4 py-3 bg-gray-900 hover:bg-gray-800/60 transition text-left"
+        >
+          <FlaskConical size={14} className="text-violet-400 flex-shrink-0" />
+          <span className="text-sm font-semibold text-gray-200">RAG Debug — Test Query</span>
+          <span className="text-xs text-gray-500 ml-1">Run a query against your knowledge base and inspect what the AI would retrieve</span>
+          <span className="ml-auto text-gray-600">{testOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</span>
+        </button>
+
+        {testOpen && (
+          <div className="bg-gray-950 p-4 space-y-4">
+            {/* Query form */}
+            <form onSubmit={handleTestQuery} className="flex gap-2 flex-wrap">
+              <input
+                value={testQuery}
+                onChange={e => setTestQuery(e.target.value)}
+                placeholder="Test query, e.g. What is the dividend of BKMB?"
+                className="flex-1 min-w-64 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-violet-500"
+              />
+              <select
+                value={testLang}
+                onChange={e => setTestLang(e.target.value)}
+                className="bg-gray-900 border border-gray-700 rounded-lg px-2 py-2 text-sm text-gray-300 focus:outline-none"
+              >
+                <option value="en">EN</option>
+                <option value="ar">AR</option>
+                <option value="mixed">Mixed</option>
+              </select>
+              <input
+                value={testSymbol}
+                onChange={e => setTestSymbol(e.target.value.toUpperCase())}
+                placeholder="Symbol (opt.)"
+                className="w-28 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-300 placeholder-gray-600 focus:outline-none focus:border-violet-500 font-mono uppercase"
+              />
+              <button
+                type="submit"
+                disabled={testLoading || !testQuery.trim()}
+                className="flex items-center gap-1.5 px-4 py-2 bg-violet-700 hover:bg-violet-600 disabled:bg-gray-800 disabled:text-gray-600 text-white text-sm font-medium rounded-lg transition"
+              >
+                {testLoading
+                  ? <><RefreshCw size={13} className="animate-spin" /> Testing…</>
+                  : <><Zap size={13} /> Run Test</>}
+              </button>
+            </form>
+
+            {testError && (
+              <p className="text-red-400 text-xs bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2">{testError}</p>
+            )}
+
+            {/* Test results */}
+            {testResult && (
+              <div className="space-y-3">
+                {/* Summary row */}
+                <div className="flex flex-wrap gap-3 items-center">
+                  {/* Verdict */}
+                  <div className={clsx(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold border',
+                    testResult.wouldRefuse
+                      ? 'bg-red-900/30 border-red-700/40 text-red-300'
+                      : 'bg-green-900/30 border-green-700/40 text-green-300',
+                  )}>
+                    {testResult.wouldRefuse
+                      ? <><XCircle size={14} /> Would Refuse</>
+                      : <><CheckCircle2 size={14} /> Would Answer</>}
+                  </div>
+                  {testResult.refuseReason && (
+                    <span className="text-xs text-red-400 bg-red-900/20 px-2 py-1 rounded border border-red-800/40">
+                      Reason: {testResult.refuseReason === 'no_results' ? 'No matching vectors' : `Low confidence (${Math.round(testResult.topScore * 100)}% < ${Math.round(testResult.hardThreshold * 100)}% threshold)`}
+                    </span>
+                  )}
+                  {/* Stats */}
+                  <div className="flex items-center gap-3 ml-auto text-xs text-gray-500 font-mono">
+                    <span>top_score: <span className={clsx('font-bold', testResult.topScore >= testResult.hardThreshold ? 'text-green-400' : 'text-orange-400')}>{testResult.topScore.toFixed(3)}</span></span>
+                    <span>threshold: <span className="text-gray-400">{testResult.hardThreshold.toFixed(2)}</span></span>
+                    <span>sources: <span className="text-gray-300">{testResult.sourceCount}</span></span>
+                    <span>latency: <span className="text-blue-400">{testResult.latencyMs}ms</span></span>
+                  </div>
+                </div>
+
+                {/* Score bar */}
+                {testResult.hadResults && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-600 w-20 flex-shrink-0">Confidence</span>
+                    <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                      <div
+                        className={clsx('h-full rounded-full transition-all', testResult.topScore >= testResult.hardThreshold ? 'bg-green-500' : 'bg-orange-500')}
+                        style={{ width: `${Math.min(100, testResult.topScore * 100)}%` }}
+                      />
+                    </div>
+                    <div className="h-2 w-px bg-yellow-500/60 relative -ml-px flex-shrink-0" style={{ marginLeft: `calc(${testResult.hardThreshold * 100}% - 1px)` }} title={`Hard threshold: ${testResult.hardThreshold}`} />
+                    <span className="text-[10px] text-gray-500">{Math.round(testResult.topScore * 100)}%</span>
+                  </div>
+                )}
+
+                {/* Sources */}
+                {testResult.sources?.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-[10px] uppercase tracking-wide text-gray-600 font-semibold">Retrieved Sources</p>
+                    {testResult.sources.map((src: any, i: number) => (
+                      <div key={i} className="flex items-start gap-3 bg-gray-900 border border-gray-800 rounded-lg px-3 py-2">
+                        <span className="text-[10px] text-gray-600 font-mono w-5 flex-shrink-0 mt-0.5">[{i+1}]</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs text-gray-300 font-medium truncate">{src.title || src.url || 'Untitled'}</p>
+                          <p className="text-[11px] text-gray-500 mt-0.5 line-clamp-2">{src.content}</p>
+                          {src.url && (
+                            <a href={src.url} target="_blank" rel="noreferrer" className="text-[10px] text-blue-500 hover:text-blue-400 flex items-center gap-0.5 mt-1">
+                              <ExternalLink size={9} />{src.url.slice(0, 60)}{src.url.length > 60 ? '…' : ''}
+                            </a>
+                          )}
+                        </div>
+                        <ScoreBadge score={src.score} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Context preview */}
+                {testResult.contextPreview && (
+                  <div>
+                    <p className="text-[10px] uppercase tracking-wide text-gray-600 mb-1 font-semibold">Context Preview (first 800 chars sent to LLM)</p>
+                    <pre className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-[11px] text-gray-400 whitespace-pre-wrap overflow-auto max-h-48 leading-relaxed">
+                      {testResult.contextPreview}
+                    </pre>
+                  </div>
+                )}
+
+                {!testResult.hadResults && (
+                  <div className="flex items-center gap-2 text-yellow-400 text-xs bg-yellow-900/20 border border-yellow-800/40 rounded-lg px-3 py-2">
+                    <AlertCircle size={13} />
+                    No vectors matched this query above the retrieval threshold ({testResult.hardThreshold.toFixed(2)}). Try indexing more content or lowering RAG_SCORE_THRESHOLD.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

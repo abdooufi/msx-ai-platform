@@ -98,7 +98,7 @@ export interface User {
   id: string
   email: string
   name: string
-  role: 'admin' | 'agent' | 'user'
+  role: 'admin' | 'agent' | 'user' | 'super_admin' | 'editor'
 }
 
 export interface AuthState {

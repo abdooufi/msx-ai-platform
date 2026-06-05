@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { RagService } from '../rag/rag.service';
@@ -12,10 +13,11 @@ export class ChatService {
   private readonly logger = new Logger(ChatService.name);
 
   constructor(
-    private pg: AppPgService,
-    private rag: RagService,
-    private llm: LlmService,
+    private pg:         AppPgService,
+    private rag:        RagService,
+    private llm:        LlmService,
     private dynamicApi: DynamicApiService,
+    private config:     ConfigService,
   ) {}
 
   // ── Off-topic guard ───────────────────────────────────────────────
@@ -115,13 +117,33 @@ export class ChatService {
 
     // 3. Detect symbol first (fast DB lookup), then fetch RAG + live data in parallel
     const symbol = await this.dynamicApi.resolveSymbolWithDb(dto.message);
+    const ragStart = Date.now();
     const [ragResult, liveData] = await Promise.all([
       this.rag.retrieve(dto.message, language, symbol ?? undefined),
       symbol
         ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
         : Promise.resolve(null),
     ]);
-    const { context, sources, hadResults } = ragResult;
+    const ragLatencyMs = Date.now() - ragStart;
+    const { context, sources, hadResults, topScore } = ragResult;
+
+    // Feature #1: Hard confidence threshold — if results exist but top score is too low,
+    // refuse rather than risk hallucination on weak context
+    const hardThreshold = parseFloat(this.config.get('RAG_HARD_THRESHOLD', '0.55'));
+    const belowHardThreshold = hadResults && !liveData && topScore < hardThreshold;
+
+    // Feature #4: Log retrieval audit trail
+    await this.pg.logRetrieval({
+      sessionId:     sessionId,
+      query:         dto.message,
+      language,
+      topScore,
+      sourceCount:   sources.length,
+      answered:      !belowHardThreshold && (hadResults || !!liveData),
+      refusedReason: belowHardThreshold ? 'low_confidence' : (!hadResults && !liveData ? 'no_data' : undefined),
+      latencyMs:     ragLatencyMs,
+      sources,
+    });
 
     // 4a. Hard short-circuit — no RAG context AND no live data
     //     → reply directly without calling the LLM so it cannot use training knowledge
@@ -143,6 +165,28 @@ export class ChatService {
       res.end();
       await this.persistMessage(sessionId, dto, {
         response: noDataReply, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
+      });
+      return;
+    }
+
+    // 4b-pre. Feature #1: Hard confidence threshold — context found but quality too low
+    if (belowHardThreshold) {
+      const lowConfidenceReply = language !== 'en'
+        ? `وجدت بعض المعلومات ذات الصلة لكنني لست متأكداً بما يكفي (درجة الثقة: ${Math.round(topScore * 100)}%) لتقديم إجابة موثوقة. يرجى زيارة www.msx.om للحصول على بيانات دقيقة أو حاول إعادة صياغة سؤالك.`
+        : `I found some related information but my confidence is too low (score: ${Math.round(topScore * 100)}%) to give a reliable answer. Please visit www.msx.om for accurate data, or try rephrasing your question.`;
+      if (!res.headersSent) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+      }
+      res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
+      res.write(`data: ${JSON.stringify({ delta: lowConfidenceReply })}\n\n`);
+      res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs: Date.now() - start })}\n\n`);
+      res.end();
+      await this.persistMessage(sessionId, dto, {
+        response: lowConfidenceReply, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
       });
       return;
     }
@@ -189,11 +233,24 @@ export class ChatService {
       }
     }
 
-    // 5. Build conversation history (last 10 turns for context window)
-    const historyMessages: LlmMessage[] = (dto.history || [])
-      .slice(-10)
-      .filter(h => h.role && h.content)
-      .map(h => ({ role: h.role as 'user' | 'assistant', content: h.content }));
+    // 5. Build conversation history — Feature #12: token-count guard
+    //    Approximate tokens: ~4 chars/token for English, ~2 for Arabic.
+    //    Reserve MAX_HISTORY_TOKENS for history to keep system + context + response in budget.
+    const MAX_HISTORY_TOKENS = parseInt(this.config.get('RAG_MAX_HISTORY_TOKENS', '1500'), 10);
+    const approxTokens = (text: string) => Math.ceil(text.length / (language === 'ar' ? 2 : 4));
+
+    const rawHistory = (dto.history || [])
+      .slice(-12)                           // cap at 12 before token count
+      .filter(h => h.role && h.content);
+
+    let historyTokenCount = 0;
+    const historyMessages: LlmMessage[] = [];
+    for (const h of [...rawHistory].reverse()) {
+      const t = approxTokens(h.content);
+      if (historyTokenCount + t > MAX_HISTORY_TOKENS) break;
+      historyMessages.unshift({ role: h.role as 'user' | 'assistant', content: h.content });
+      historyTokenCount += t;
+    }
 
     // 6. Build system prompt with retrieved context and live data
     const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData, hasContext);

@@ -6,7 +6,7 @@ import axios from 'axios';
 export class EmbeddingService {
   private readonly logger = new Logger(EmbeddingService.name);
   private readonly ollamaUrl: string;
-  private readonly model: string;
+  readonly model: string;
 
   private readonly embedTimeout: number;
 

@@ -11,8 +11,10 @@ import { ChatbootPgService } from './chatboot-pg.service';
 import { PgIndexingService, IndexableTable } from './pg-indexing.service';
 import { DynamicApiService } from './dynamic-api.service';
 import { LlmService, AiProvider } from '../rag/llm.service';
+import { RagService } from '../rag/rag.service';
 import { QdrantService } from '../rag/qdrant.service';
 import { EmbeddingService } from '../rag/embedding.service';
+import { AppPgService } from '../database/app-pg.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../../schemas/audit-log.schema';
 
@@ -23,14 +25,16 @@ import { AuditAction } from '../../schemas/audit-log.schema';
 @Controller('admin')
 export class AdminController implements OnModuleInit {
   constructor(
-    private readonly admin: AdminService,
-    private readonly pg: ChatbootPgService,
+    private readonly admin:     AdminService,
+    private readonly pg:        ChatbootPgService,
+    private readonly appPg:     AppPgService,
     private readonly pgIndexing: PgIndexingService,
     private readonly dynamicApi: DynamicApiService,
-    private readonly llm: LlmService,
-    private readonly qdrant: QdrantService,
-    private readonly embedding: EmbeddingService,
-    private readonly audit: AuditService,
+    private readonly llm:       LlmService,
+    private readonly rag:       RagService,
+    private readonly qdrant:    QdrantService,
+    private readonly embedding:  EmbeddingService,
+    private readonly audit:     AuditService,
   ) {}
 
   /** Restore persisted AI provider on startup */
@@ -690,6 +694,39 @@ export class AdminController implements OnModuleInit {
 
   // ── Qdrant snapshots ──────────────────────────────────────────────────────
 
+  /** DELETE /admin/qdrant/all — wipe every Qdrant collection (super_admin only) */
+  @Delete('qdrant/all')
+  @HttpCode(HttpStatus.OK)
+  @Roles('super_admin')
+  @ApiOperation({ summary: 'Delete ALL Qdrant collections — super_admin only' })
+  async deleteAllQdrantCollections(@Request() req) {
+    const collections = await this.qdrant.listCollections();
+    let deleted = 0;
+    let failed  = 0;
+
+    // Delete in parallel batches of 20 so we don't time out on large collection sets
+    const BATCH = 20;
+    for (let i = 0; i < collections.length; i += BATCH) {
+      const batch = collections.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map(name =>
+          this.qdrant.deleteCollection(name)
+            .then(() => true)
+            .catch(() => false),
+        ),
+      );
+      deleted += results.filter(Boolean).length;
+      failed  += results.filter(v => !v).length;
+    }
+
+    await this.audit.log(AuditService.ctx(req), {
+      action:   AuditAction.KB_DELETE,
+      resource: 'qdrant_all',
+      details:  `Wiped ALL Qdrant collections: ${deleted} deleted, ${failed} failed`,
+    });
+    return { deleted, failed, total: collections.length };
+  }
+
   /** POST /admin/qdrant/snapshot  — create snapshot for all or one collection */
   @Post('qdrant/snapshot')
   @HttpCode(HttpStatus.OK)
@@ -731,5 +768,78 @@ export class AdminController implements OnModuleInit {
       });
     }
     return { deleted: name, collection };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // RAG Debug Tools (Feature #9: Admin Test Query)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * POST /admin/rag/test
+   * Run a test RAG query and return full debug info: retrieved chunks, scores,
+   * whether the hard threshold would be met, and context preview.
+   */
+  @Post('rag/test')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Test RAG retrieval — debug tool showing retrieved context and scores' })
+  async testRagQuery(
+    @Body() body: {
+      query:           string;
+      language?:       string;
+      companySymbol?:  string;
+    },
+  ) {
+    const start   = Date.now();
+    const { query, language = 'en', companySymbol } = body;
+    if (!query?.trim()) return { error: 'query is required' };
+
+    const result = await this.rag.retrieve(query, language, companySymbol || undefined);
+
+    // Determine what the chat service would do
+    const hardThreshold = parseFloat(process.env.RAG_HARD_THRESHOLD ?? '0.55');
+    const wouldRefuse =
+      !result.hadResults ||
+      (result.hadResults && result.topScore < hardThreshold);
+
+    return {
+      query,
+      language,
+      companySymbol:   companySymbol || null,
+      hadResults:      result.hadResults,
+      topScore:        result.topScore,
+      hardThreshold,
+      wouldRefuse,
+      refuseReason:    !result.hadResults ? 'no_results' : wouldRefuse ? 'low_confidence' : null,
+      sourceCount:     result.sources.length,
+      sources:         result.sources,
+      contextPreview:  result.context.slice(0, 800),
+      latencyMs:       Date.now() - start,
+    };
+  }
+
+  /**
+   * GET /admin/retrieval-logs
+   * Paginated retrieval audit trail — every RAG query with scores and refused/answered status.
+   */
+  @Get('retrieval-logs')
+  @ApiOperation({ summary: 'RAG retrieval audit logs' })
+  @ApiQuery({ name: 'page', required: false })
+  async getRetrievalLogs(@Query('page') page = '1') {
+    return this.appPg.listRetrievalLogs(parseInt(page));
+  }
+
+  /**
+   * GET /admin/failed-jobs
+   * Dead-letter queue — jobs that exhausted all retry attempts.
+   */
+  @Get('failed-jobs')
+  @ApiOperation({ summary: 'Dead-letter queue — permanently failed background jobs' })
+  @ApiQuery({ name: 'page',  required: false })
+  @ApiQuery({ name: 'queue', required: false })
+  async getFailedJobs(
+    @Query('page') page = '1',
+    @Query('queue') queue?: string,
+  ) {
+    return this.appPg.listFailedJobs(parseInt(page), 50, queue);
   }
 }

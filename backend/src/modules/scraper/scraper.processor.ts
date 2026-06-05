@@ -2,10 +2,12 @@ import { Processor, Process, OnQueueFailed } from '@nestjs/bull';
 import { Job } from 'bull';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { RagService } from '../rag/rag.service';
 import { QdrantService } from '../rag/qdrant.service';
+import { AppPgService } from '../database/app-pg.service';
 import { KnowledgeType } from '../../schemas/knowledge.schema';
 import { SCRAPER_QUEUE, CrawlJobType } from './scraper.constants';
 
@@ -15,9 +17,10 @@ export class ScraperProcessor {
   private visited = new Set<string>();
 
   constructor(
-    private rag: RagService,
+    private rag:    RagService,
     private qdrant: QdrantService,
     private config: ConfigService,
+    private pg:     AppPgService,   // Feature #5: content-hash change detection
   ) {}
 
   @Process(CrawlJobType.CRAWL_SITE)
@@ -114,12 +117,27 @@ export class ScraperProcessor {
         return this.extractLinks($, url);
       }
 
+      // Feature #5: Content-hash change detection — skip unchanged pages
+      const contentHash = createHash('sha256').update(bodyText).digest('hex');
+      const storedHash  = await this.pg.getSourceHash(url);
+
+      if (storedHash === contentHash) {
+        this.logger.debug(`Skip (unchanged): ${url}`);
+        return this.extractLinks($, url);
+      }
+
+      // Content changed or new — delete old vectors before re-indexing
+      if (storedHash) {
+        this.logger.debug(`Content changed for: ${url} — removing old vectors`);
+        await this.rag.deleteSource(url, companySymbol).catch(() => {});
+      }
+
       // Detect language
       const langAttr = $('html').attr('lang') || '';
       const language = langAttr.includes('ar') ? 'ar' : 'en';
 
       // Index into RAG — route to per-company collection when symbol is known
-      await this.rag.indexContent({
+      const chunksIndexed = await this.rag.indexContent({
         title,
         content: bodyText,
         sourceId: url,
@@ -134,8 +152,11 @@ export class ScraperProcessor {
         },
       });
 
+      // Feature #5: Persist the new content hash after successful indexing
+      await this.pg.upsertSourceHash(url, contentHash, chunksIndexed);
+
       this.logger.debug(
-        `✅ Indexed: ${title} (${url})${companySymbol ? ` → ${companySymbol}` : ''}`,
+        `✅ Indexed: ${title} (${url})${companySymbol ? ` → ${companySymbol}` : ''}${storedHash ? ' [updated]' : ' [new]'}`,
       );
       return this.extractLinks($, url);
     } catch (err) {
@@ -175,7 +196,20 @@ export class ScraperProcessor {
   }
 
   @OnQueueFailed()
-  onFailed(job: Job, err: Error) {
+  async onFailed(job: Job, err: Error) {
     this.logger.error(`Job ${job.id} (${job.name}) failed: ${err.message}`);
+    // Feature #7: Log permanently failed jobs (exhausted all retries) to DB
+    const maxAttempts = job.opts?.attempts ?? 3;
+    if (job.attemptsMade >= maxAttempts) {
+      await this.pg.logFailedJob({
+        queue:         SCRAPER_QUEUE,
+        jobId:         job.id,
+        jobName:       job.name,
+        attemptsMade:  job.attemptsMade,
+        errorMessage:  err.message,
+        jobData:       job.data,
+      }).catch(() => {});
+      this.logger.error(`🚨 Job ${job.id} permanently failed after ${job.attemptsMade} attempts`);
+    }
   }
 }

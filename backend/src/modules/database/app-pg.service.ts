@@ -194,6 +194,48 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
         created_at     TIMESTAMP DEFAULT NOW()
       )
     `);
+    // source_hashes — content-hash change detection for incremental crawling (Feature #5)
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS source_hashes (
+        source_id    TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        chunk_count  INTEGER DEFAULT 0,
+        indexed_at   TIMESTAMPTZ DEFAULT NOW(),
+        updated_at   TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    // retrieval_logs — audit trail for every RAG query (Feature #4)
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS retrieval_logs (
+        id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id     VARCHAR(255),
+        query          TEXT NOT NULL,
+        language       VARCHAR(10) DEFAULT 'en',
+        top_score      FLOAT,
+        source_count   INTEGER DEFAULT 0,
+        answered       BOOLEAN DEFAULT true,
+        refused_reason VARCHAR(100),
+        latency_ms     INTEGER,
+        sources        JSONB DEFAULT '[]',
+        created_at     TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_retrieval_created ON retrieval_logs(created_at DESC)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_retrieval_session  ON retrieval_logs(session_id, created_at DESC)`);
+    // failed_jobs — dead-letter queue for permanently failed BullMQ jobs (Feature #7)
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS failed_jobs (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        queue         VARCHAR(100) NOT NULL,
+        job_id        VARCHAR(255),
+        job_name      VARCHAR(255),
+        attempts_made INTEGER DEFAULT 0,
+        error_message TEXT,
+        job_data      JSONB DEFAULT '{}',
+        created_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await this.query(`CREATE INDEX IF NOT EXISTS idx_failed_jobs_queue   ON failed_jobs(queue, created_at DESC)`);
     // ensure app_users admin
     await this.ensureAdminUser();
     this.logger.log('✅ AppPg migrations complete');
@@ -710,5 +752,105 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
   async deleteUrlSchedule(id: string) {
     await this.query(`DELETE FROM doc_url_schedules WHERE id=$1`, [id]);
     return { ok: true };
+  }
+
+  // ─── Source Hashes (content-hash change detection) ────────────────────────
+
+  /** Return the stored SHA-256 hash for a source URL/ID, or null if not yet indexed */
+  async getSourceHash(sourceId: string): Promise<string | null> {
+    const rows = await this.query<{ content_hash: string }>(
+      `SELECT content_hash FROM source_hashes WHERE source_id=$1`,
+      [sourceId],
+    );
+    return rows[0]?.content_hash ?? null;
+  }
+
+  /** Upsert the content hash and chunk count for a source after successful indexing */
+  async upsertSourceHash(sourceId: string, contentHash: string, chunkCount = 0): Promise<void> {
+    await this.query(
+      `INSERT INTO source_hashes (source_id, content_hash, chunk_count, indexed_at, updated_at)
+       VALUES ($1, $2, $3, NOW(), NOW())
+       ON CONFLICT (source_id) DO UPDATE
+         SET content_hash=$2, chunk_count=$3, updated_at=NOW()`,
+      [sourceId, contentHash, chunkCount],
+    );
+  }
+
+  // ─── Retrieval Logs (RAG audit trail) ────────────────────────────────────
+
+  async logRetrieval(data: {
+    sessionId:     string;
+    query:         string;
+    language?:     string;
+    topScore?:     number;
+    sourceCount?:  number;
+    answered?:     boolean;
+    refusedReason?: string;
+    latencyMs?:    number;
+    sources?:      any[];
+  }): Promise<void> {
+    try {
+      await this.query(
+        `INSERT INTO retrieval_logs
+           (session_id, query, language, top_score, source_count, answered, refused_reason, latency_ms, sources)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          data.sessionId, data.query, data.language ?? 'en',
+          data.topScore ?? null, data.sourceCount ?? 0,
+          data.answered ?? true, data.refusedReason ?? null,
+          data.latencyMs ?? null,
+          data.sources ? JSON.stringify(data.sources.map(s => ({ title: s.title, url: s.url, score: s.score }))) : '[]',
+        ],
+      );
+    } catch { /* never crash the chat flow */ }
+  }
+
+  async listRetrievalLogs(page = 1, limit = 50): Promise<any> {
+    const skip = (page - 1) * limit;
+    const [logs, countRow] = await Promise.all([
+      this.query(
+        `SELECT * FROM retrieval_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+        [limit, skip],
+      ),
+      this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM retrieval_logs`),
+    ]);
+    return { logs: logs.map(r => AppPgService.c(r)), total: parseInt(countRow[0].count, 10), page };
+  }
+
+  // ─── Failed Jobs (dead-letter queue) ─────────────────────────────────────
+
+  async logFailedJob(data: {
+    queue:         string;
+    jobId?:        string | number;
+    jobName?:      string;
+    attemptsMade?: number;
+    errorMessage?: string;
+    jobData?:      any;
+  }): Promise<void> {
+    try {
+      await this.query(
+        `INSERT INTO failed_jobs (queue, job_id, job_name, attempts_made, error_message, job_data)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          data.queue, data.jobId ? String(data.jobId) : null, data.jobName ?? null,
+          data.attemptsMade ?? 0, data.errorMessage ?? null,
+          data.jobData ? JSON.stringify(data.jobData) : '{}',
+        ],
+      );
+    } catch { /* never crash the queue processor */ }
+  }
+
+  async listFailedJobs(page = 1, limit = 50, queue?: string): Promise<any> {
+    const skip = (page - 1) * limit;
+    const params: any[] = [];
+    const where = queue ? `WHERE queue=$${(params.push(queue), params.length)}` : '';
+    const [jobs, countRow] = await Promise.all([
+      this.query(
+        `SELECT * FROM failed_jobs ${where} ORDER BY created_at DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`,
+        [...params, limit, skip],
+      ),
+      this.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM failed_jobs ${where}`, params),
+    ]);
+    return { jobs: jobs.map(r => AppPgService.c(r)), total: parseInt(countRow[0].count, 10), page };
   }
 }

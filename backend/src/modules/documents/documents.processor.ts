@@ -25,8 +25,8 @@ export class DocumentsProcessor {
   private readonly logger = new Logger(DocumentsProcessor.name);
 
   constructor(
-    private pg:  AppPgService,
-    private rag: RagService,
+    private pg:       AppPgService,
+    private rag:      RagService,
     @InjectQueue(DOCUMENTS_QUEUE) private docsQueue: Queue,
   ) {}
 
@@ -336,7 +336,20 @@ export class DocumentsProcessor {
   }
 
   @OnQueueFailed()
-  onFailed(job: Job, err: Error) {
+  async onFailed(job: Job, err: Error) {
     this.logger.error(`Document job ${job.id} (${job.name}) failed: ${err.message}`);
+    // Feature #7: Log permanently failed jobs to DB dead-letter table
+    const maxAttempts = job.opts?.attempts ?? 3;
+    if (job.attemptsMade >= maxAttempts) {
+      await this.pg.logFailedJob({
+        queue:         DOCUMENTS_QUEUE,
+        jobId:         job.id,
+        jobName:       job.name,
+        attemptsMade:  job.attemptsMade,
+        errorMessage:  err.message,
+        jobData:       { docId: job.data?.docId, title: job.data?.title },
+      }).catch(() => {});
+      this.logger.error(`🚨 Document job ${job.id} permanently failed after ${job.attemptsMade} attempts — docId: ${job.data?.docId}`);
+    }
   }
 }

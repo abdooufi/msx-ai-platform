@@ -257,6 +257,14 @@ export const getAuditLogs  = (params: {
 }
 export const getAuditStats = () => api.get('/audit/stats')
 
+// ─── RAG Debug / Audit ────────────────────────────────────────────
+export const testRagQuery = (body: { query: string; language?: string; companySymbol?: string }) =>
+  api.post('/admin/rag/test', body)
+export const getRetrievalLogs = (page = 1) =>
+  api.get(`/admin/retrieval-logs?page=${page}`)
+export const getFailedJobs = (page = 1, queue?: string) =>
+  api.get(`/admin/failed-jobs?page=${page}${queue ? `&queue=${queue}` : ''}`)
+
 // ─── Qdrant Admin ─────────────────────────────────────────────────
 export const listQdrantCollections = () => api.get('/admin/qdrant/collections')
 export const searchQdrant = (body: {
@@ -290,6 +298,9 @@ export const listQdrantSnapshots       = (collection: string) =>
 /** Delete a named snapshot from a collection */
 export const deleteQdrantSnapshot      = (collection: string, name: string) =>
   api.delete(`/admin/qdrant/snapshot/${encodeURIComponent(collection)}/${encodeURIComponent(name)}`)
+
+/** Delete ALL Qdrant collections — super_admin only (long timeout: many collections) */
+export const deleteAllQdrantData = () => api.delete('/admin/qdrant/all', { timeout: 300_000 })
 
 // ─── Qdrant Snapshot Schedule (via scraper queue) ─────────────────
 export const getQdrantSnapshotSchedule    = ()             => api.get('/train/website/snapshot-schedule')

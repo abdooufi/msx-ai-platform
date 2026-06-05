@@ -251,8 +251,8 @@ function ScheduleCard() {
       )}
     </div>
   )
-}
-
+}  
+ 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function TrainingPage() {
