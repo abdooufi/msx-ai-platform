@@ -260,6 +260,7 @@ export default function TrainingPage() {
   const [companyStats, setCompanyStats] = useState<CompanyStat[]>([])
   const [allCompanies, setAllCompanies] = useState<any[]>([])
   const [coSearch,     setCoSearch]     = useState('')
+  const [showAllCo,    setShowAllCo]    = useState(false)
   const [results,      setResults]      = useState<CrawlResult[]>([])
   const [loading,      setLoading]      = useState<Record<string, boolean>>({})
   const [singleUrl,    setSingleUrl]    = useState('')
@@ -311,12 +312,16 @@ export default function TrainingPage() {
       mergedCompanies.push({ symbol: c.symbol, name: c.symbol, collection: c.collection, vectors: c.vectors, indexed: true })
     }
   })
+  const CO_PAGE_SIZE  = 10
   const maxVec        = mergedCompanies.reduce((m, c) => c.vectors > m ? c.vectors : m, 1)
   const indexedCount  = mergedCompanies.filter(c => c.indexed).length
   const coSearchLower = coSearch.trim().toLowerCase()
   const filteredCompanies = coSearchLower
     ? mergedCompanies.filter(c => c.symbol.toLowerCase().includes(coSearchLower) || c.name.toLowerCase().includes(coSearchLower))
     : mergedCompanies
+  const visibleCompanies = (!coSearchLower && !showAllCo)
+    ? filteredCompanies.slice(0, CO_PAGE_SIZE)
+    : filteredCompanies
 
   const handleSitemap = async () => {
     setL('sitemap', true)
@@ -436,7 +441,7 @@ export default function TrainingPage() {
               <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               <input
                 value={coSearch}
-                onChange={e => setCoSearch(e.target.value)}
+                onChange={e => { setCoSearch(e.target.value); setShowAllCo(false) }}
                 placeholder="Search…"
                 className="bg-gray-800 border border-gray-700/50 rounded-lg pl-7 pr-7 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-teal-500/60 w-36"
               />
@@ -458,36 +463,51 @@ export default function TrainingPage() {
             }
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5">
-            {filteredCompanies.map(c => (
-              <div
-                key={c.symbol}
-                className={`border rounded-lg p-3 space-y-1 ${
-                  c.indexed
-                    ? 'bg-gray-800/60 border-gray-700/50'
-                    : 'bg-gray-800/20 border-gray-800 opacity-60'
-                }`}
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5">
+              {visibleCompanies.map(c => (
+                <div
+                  key={c.symbol}
+                  className={`border rounded-lg p-3 space-y-1 ${
+                    c.indexed
+                      ? 'bg-gray-800/60 border-gray-700/50'
+                      : 'bg-gray-800/20 border-gray-800 opacity-60'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className={`text-sm font-bold font-mono ${c.indexed ? 'text-teal-300' : 'text-gray-500'}`}>
+                      {c.symbol}
+                    </span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0 ${
+                      c.indexed ? 'text-gray-400 bg-gray-700/60' : 'text-gray-600 bg-gray-800'
+                    }`}>
+                      {c.vectors > 0 ? c.vectors.toLocaleString() : '—'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-500 truncate leading-tight" title={c.name}>{c.name}</p>
+                  <div className="w-full bg-gray-700 rounded-full h-0.5 mt-1">
+                    <div
+                      className={`h-0.5 rounded-full transition-all ${c.indexed ? 'bg-teal-500' : 'bg-gray-600'}`}
+                      style={{ width: c.vectors > 0 ? `${Math.min(100, (c.vectors / maxVec) * 100)}%` : '0%' }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Show more / less */}
+            {!coSearchLower && filteredCompanies.length > CO_PAGE_SIZE && (
+              <button
+                onClick={() => setShowAllCo(v => !v)}
+                className="mt-3 w-full flex items-center justify-center gap-1.5 py-2 text-xs text-gray-500 hover:text-gray-300 border-t border-gray-800/50 transition"
               >
-                <div className="flex items-center justify-between gap-1">
-                  <span className={`text-sm font-bold font-mono ${c.indexed ? 'text-teal-300' : 'text-gray-500'}`}>
-                    {c.symbol}
-                  </span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0 ${
-                    c.indexed ? 'text-gray-400 bg-gray-700/60' : 'text-gray-600 bg-gray-800'
-                  }`}>
-                    {c.vectors > 0 ? c.vectors.toLocaleString() : '—'}
-                  </span>
-                </div>
-                <p className="text-[10px] text-gray-500 truncate leading-tight" title={c.name}>{c.name}</p>
-                <div className="w-full bg-gray-700 rounded-full h-0.5 mt-1">
-                  <div
-                    className={`h-0.5 rounded-full transition-all ${c.indexed ? 'bg-teal-500' : 'bg-gray-600'}`}
-                    style={{ width: c.vectors > 0 ? `${Math.min(100, (c.vectors / maxVec) * 100)}%` : '0%' }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
+                {showAllCo
+                  ? <><ChevronUp size={11} /> Show top {CO_PAGE_SIZE} only</>
+                  : <><ChevronDown size={11} /> Show {filteredCompanies.length - CO_PAGE_SIZE} more companies</>
+                }
+              </button>
+            )}
+          </>
         )}
       </div>
 
