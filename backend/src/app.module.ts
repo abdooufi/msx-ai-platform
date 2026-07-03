@@ -4,6 +4,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bull';
 import { AuthModule } from './modules/auth/auth.module';
 import { ChatModule } from './modules/chat/chat.module';
+import { ChannelsModule } from './modules/channels/channels.module';
 import { RagModule } from './modules/rag/rag.module';
 import { ScraperModule } from './modules/scraper/scraper.module';
 import { DocumentsModule } from './modules/documents/documents.module';
@@ -62,6 +63,7 @@ import { appConfig } from './config/app.config';
     // ─── Feature modules ──────────────────────────────────────
     AuthModule,
     ChatModule,
+    ChannelsModule,
     RagModule,
     ScraperModule,
     DocumentsModule,

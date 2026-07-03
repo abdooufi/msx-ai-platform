@@ -1,5 +1,3 @@
-version: '3.9'
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Persistent data lives in ./data/ on the HOST machine.
 # Safe commands:
@@ -61,6 +59,42 @@ services:
     restart: unless-stopped
     networks: [msx-net]
 
+  # --- PostgreSQL (app + chatboot data) ---
+  # If you already run Postgres on the host, keep CHATBOOT_PG_HOST=host.docker.internal
+  # in .env and this container is simply unused. For a self-contained deployment
+  # set CHATBOOT_PG_HOST=postgres (and the same for the app DB vars).
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${CHATBOOT_PG_USER:-postgres}
+      - POSTGRES_PASSWORD=${CHATBOOT_PG_PASS:-root}
+      - POSTGRES_DB=${CHATBOOT_PG_DB:-Chatboot}
+    ports:
+      - '5433:5432'                        # 5433 on host to avoid clashing with a local Postgres
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${CHATBOOT_PG_USER:-postgres}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [msx-net]
+
+  # --- Ollama (local LLM + embeddings) ---
+  # After first start, pull the models once:
+  #   docker compose exec ollama ollama pull qwen2.5:7b
+  #   docker compose exec ollama ollama pull nomic-embed-text
+  # Set OLLAMA_URL=http://ollama:11434 in .env to use this container.
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - '11434:11434'
+    volumes:
+      - ./data/ollama:/root/.ollama        # models survive docker down
+    restart: unless-stopped
+    networks: [msx-net]
+
   # --- Qdrant (vector index) ---
   qdrant:
     image: qdrant/qdrant:latest
@@ -72,18 +106,21 @@ services:
     networks: [msx-net]
 
   # --- Redis (cache + Bull job queue) ---
+  # Password comes from REDIS_PASS in .env (falls back to redispass for dev)
   redis:
     image: redis:7-alpine
     command: >
       redis-server
-        --requirepass redispass
+        --requirepass ${REDIS_PASS:-redispass}
         --appendonly yes
         --appendfsync everysec
         --save 60 1
     volumes:
       - ./data/redis:/data                 # ← host folder, AOF + RDB snapshots
+    environment:
+      - REDIS_PASS_CHECK=${REDIS_PASS:-redispass}
     healthcheck:
-      test: ['CMD', 'redis-cli', '-a', 'redispass', 'ping']
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASS_CHECK" ping | grep PONG']
       interval: 10s
       timeout: 5s
       retries: 5

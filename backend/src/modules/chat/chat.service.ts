@@ -5,7 +5,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { RagService } from '../rag/rag.service';
 import { LlmService, LlmMessage } from '../rag/llm.service';
 import { DynamicApiService } from '../admin/dynamic-api.service';
+import { ChatbootPgService } from '../admin/chatboot-pg.service';
 import { AppPgService } from '../database/app-pg.service';
+import { AnswerCacheService } from './answer-cache.service';
 import { ChatRequestDto } from './chat.dto';
 
 @Injectable()
@@ -14,9 +16,11 @@ export class ChatService {
 
   constructor(
     private pg:         AppPgService,
+    private chatPg:     ChatbootPgService,
     private rag:        RagService,
     private llm:        LlmService,
     private dynamicApi: DynamicApiService,
+    private cache:      AnswerCacheService,
     private config:     ConfigService,
   ) {}
 
@@ -79,6 +83,73 @@ export class ChatService {
     return null; // let the LLM decide
   }
 
+  // ── Human handoff ─────────────────────────────────────────────────
+
+  /** True when the user explicitly asks to talk to a human / agent / support */
+  private isHandoffRequest(message: string): boolean {
+    return /(?:talk|speak|chat|connect)\s+(?:to|with)\s+(?:a\s+|an\s+)?(?:human|agent|person|someone|representative|support)|human\s+agent|real\s+person|customer\s+(?:service|support|care)|أريد\s+(?:موظف|التحدث|التكلم)|(?:التحدث|التكلم|الكلام)\s+مع\s+(?:موظف|شخص|إنسان|مسؤول)|خدمة\s+العملاء/i
+      .test(message);
+  }
+
+  private handoffReply(language: string): string {
+    return language !== 'en'
+      ? 'أتفهم رغبتك في التحدث مع موظف. يمكنك التواصل مع فريق بورصة مسقط مباشرة عبر صفحة "اتصل بنا" في الموقع الرسمي www.msx.om، وسيسعد الفريق بمساعدتك. تم تسجيل طلبك أيضاً لدى فريق الدعم.'
+      : 'I understand you\'d like to speak with a person. You can reach the Muscat Stock Exchange team directly through the "Contact Us" page on the official website www.msx.om — they will be happy to help. Your request has also been logged for the support team.';
+  }
+
+  // ── SSE helpers ───────────────────────────────────────────────────
+
+  private startSse(res: Response): void {
+    if (res.headersSent) return;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+  }
+
+  /**
+   * Stream a pre-built answer (refusal, FAQ hit, cache hit…) without an LLM call,
+   * then persist the exchange.
+   */
+  private async sendDirectReply(
+    res: Response,
+    sessionId: string,
+    dto: ChatRequestDto,
+    text: string,
+    language: string,
+    start: number,
+    opts: { sources?: any[]; hadContext?: boolean; provider?: string } = {},
+  ): Promise<void> {
+    const sources = opts.sources ?? [];
+    this.startSse(res);
+    res.write(`data: ${JSON.stringify({
+      type: 'meta', sessionId, language,
+      sources: sources.slice(0, 3),
+      hadContext: opts.hadContext ?? false,
+    })}\n\n`);
+    res.write(`data: ${JSON.stringify({ delta: text })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      done: true, tokensUsed: 0, latencyMs: Date.now() - start,
+      ...(opts.provider ? { provider: opts.provider } : {}),
+    })}\n\n`);
+    res.end();
+    await this.persistMessage(sessionId, dto, {
+      response: text, language, sources, tokensUsed: 0, latencyMs: Date.now() - start,
+    });
+  }
+
+  /** Record an unanswered / refused question — never crashes the chat */
+  private async logUnanswered(
+    question: string, language: string, sessionId: string, reason: string,
+  ): Promise<void> {
+    try {
+      await this.chatPg.logUnansweredQuestion({ question, language, sessionId, reason });
+    } catch (err) {
+      this.logger.warn(`Failed to log unanswered question: ${err.message}`);
+    }
+  }
+
   /**
    * Main streaming chat endpoint.
    * 1. Detect language
@@ -95,24 +166,54 @@ export class ChatService {
     // 1. Detect language
     const language = await this.llm.detectLanguage(dto.message);
 
-    // 2. Off-topic guard — fast path, zero LLM tokens
+    // 2a. Human handoff — user explicitly asked for a person
+    if (this.isHandoffRequest(dto.message)) {
+      await this.logUnanswered(dto.message, language, sessionId, 'handoff');
+      await this.sendDirectReply(res, sessionId, dto, this.handoffReply(language), language, start);
+      return;
+    }
+
+    // 2b. Off-topic guard — fast path, zero LLM tokens
     const refusal = this.checkOffTopic(dto.message, language);
     if (refusal) {
-      if (!res.headersSent) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        res.flushHeaders();
-      }
-      res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
-      res.write(`data: ${JSON.stringify({ delta: refusal })}\n\n`);
-      res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs: Date.now() - start })}\n\n`);
-      res.end();
-      await this.persistMessage(sessionId, dto, {
-        response: refusal, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
-      });
+      await this.logUnanswered(dto.message, language, sessionId, 'off_topic');
+      await this.sendDirectReply(res, sessionId, dto, refusal, language, start);
       return;
+    }
+
+    // 2c. FAQ exact match — answer straight from the faqs table, no LLM
+    try {
+      const faq = await this.chatPg.findFaqMatch(dto.message);
+      if (faq?.answer) {
+        await this.sendDirectReply(res, sessionId, dto, faq.answer, language, start, {
+          hadContext: true, provider: 'faq',
+        });
+        await this.trackEvent({
+          type: 'message_sent', sessionId, language,
+          channel: dto.channel || 'web', latencyMs: Date.now() - start,
+          tokensUsed: 0, confidenceScore: 1, hadContext: true,
+        });
+        return;
+      }
+    } catch (err) {
+      this.logger.warn(`FAQ lookup failed: ${err.message}`); // continue with normal flow
+    }
+
+    // 2d. Answer cache — replay identical recent questions (static answers only)
+    const cacheable = !(dto.history?.length);
+    if (cacheable) {
+      const cached = await this.cache.get(dto.message, language);
+      if (cached) {
+        await this.sendDirectReply(res, sessionId, dto, cached.text, language, start, {
+          sources: cached.sources, hadContext: true, provider: 'cache',
+        });
+        await this.trackEvent({
+          type: 'message_sent', sessionId, language,
+          channel: dto.channel || 'web', latencyMs: Date.now() - start,
+          tokensUsed: 0, confidenceScore: cached.sources[0]?.score ?? 0, hadContext: true,
+        });
+        return;
+      }
     }
 
     // 3. Detect symbol first (fast DB lookup), then fetch RAG + live data in parallel
@@ -152,20 +253,8 @@ export class ChatService {
       const noDataReply = language !== 'en'
         ? 'لا تتوفر لديّ معلومات كافية حول هذا الموضوع في قاعدة بياناتي. يرجى زيارة www.msx.om للحصول على أحدث المعلومات.'
         : "I don't have enough information about this topic in my knowledge base. Please visit www.msx.om for the latest information.";
-      if (!res.headersSent) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        res.flushHeaders();
-      }
-      res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
-      res.write(`data: ${JSON.stringify({ delta: noDataReply })}\n\n`);
-      res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs: Date.now() - start })}\n\n`);
-      res.end();
-      await this.persistMessage(sessionId, dto, {
-        response: noDataReply, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
-      });
+      await this.logUnanswered(dto.message, language, sessionId, 'no_data');
+      await this.sendDirectReply(res, sessionId, dto, noDataReply, language, start);
       return;
     }
 
@@ -174,20 +263,8 @@ export class ChatService {
       const lowConfidenceReply = language !== 'en'
         ? `وجدت بعض المعلومات ذات الصلة لكنني لست متأكداً بما يكفي (درجة الثقة: ${Math.round(topScore * 100)}%) لتقديم إجابة موثوقة. يرجى زيارة www.msx.om للحصول على بيانات دقيقة أو حاول إعادة صياغة سؤالك.`
         : `I found some related information but my confidence is too low (score: ${Math.round(topScore * 100)}%) to give a reliable answer. Please visit www.msx.om for accurate data, or try rephrasing your question.`;
-      if (!res.headersSent) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        res.flushHeaders();
-      }
-      res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
-      res.write(`data: ${JSON.stringify({ delta: lowConfidenceReply })}\n\n`);
-      res.write(`data: ${JSON.stringify({ done: true, tokensUsed: 0, latencyMs: Date.now() - start })}\n\n`);
-      res.end();
-      await this.persistMessage(sessionId, dto, {
-        response: lowConfidenceReply, language, sources: [], tokensUsed: 0, latencyMs: Date.now() - start,
-      });
+      await this.logUnanswered(dto.message, language, sessionId, 'low_confidence');
+      await this.sendDirectReply(res, sessionId, dto, lowConfidenceReply, language, start);
       return;
     }
 
@@ -200,13 +277,7 @@ export class ChatService {
       const rawChart = await this.dynamicApi.getChartData(symbol).catch(() => null);
       const chartPayload = rawChart ? this.buildChartPayload(symbol, rawChart) : null;
       if (chartPayload && chartPayload.points.length > 0) {
-        if (!res.headersSent) {
-          res.setHeader('Content-Type', 'text/event-stream');
-          res.setHeader('Cache-Control', 'no-cache');
-          res.setHeader('Connection', 'keep-alive');
-          res.setHeader('X-Accel-Buffering', 'no');
-          res.flushHeaders();
-        }
+        this.startSse(res);
         const s = chartPayload.summary;
         const textSummary =
           `**${symbol.toUpperCase()} — Intraday Chart** (${s.tradesCount} trades)\n\n` +
@@ -261,13 +332,7 @@ export class ChatService {
     ];
 
     // 7. Set SSE headers BEFORE any write
-    if (!res.headersSent) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.flushHeaders();
-    }
+    this.startSse(res);
 
     // Add source info to SSE before streaming text
     res.write(
@@ -284,6 +349,7 @@ export class ChatService {
     let fullResponse = '';
     let tokensUsed = 0;
     let latencyMs = 0;
+    let streamOk = true;
 
     // For 'auto' mode: pre-resolve provider once so stream uses the same one
     let resolvedProvider: 'ollama' | 'deepseek' | 'claude' | undefined;
@@ -304,6 +370,7 @@ export class ChatService {
       fullResponse = fullText;
     } catch (err) {
       this.logger.error(`Chat stream error: ${err.message}`);
+      streamOk = false;
       fullResponse = language !== 'en'
         ? 'عذراً، حدث خطأ. يرجى المحاولة مرة أخرى.'
         : 'Sorry, an error occurred. Please try again.';
@@ -314,6 +381,13 @@ export class ChatService {
     }
 
     latencyMs = latencyMs || (Date.now() - start);
+
+    // Cache static answers only: no live market data, no conversation history
+    if (streamOk && cacheable && !liveData && fullResponse) {
+      await this.cache.set(dto.message, language, {
+        text: fullResponse, language, sources: sources.slice(0, 5),
+      });
+    }
 
     // 7. Persist conversation
     await this.persistMessage(sessionId, dto, {
@@ -407,9 +481,105 @@ export class ChatService {
     return this.pg.getConversationBySession(sessionId);
   }
 
+  /**
+   * Non-streaming chat — same pipeline as streamChat but returns the full
+   * answer as a string. Used by non-SSE channels (Telegram, future WhatsApp…).
+   */
+  async chatOnce(dto: ChatRequestDto): Promise<{ text: string; language: string; sessionId: string }> {
+    const sessionId = dto.sessionId || uuidv4();
+    const start = Date.now();
+    const language = await this.llm.detectLanguage(dto.message);
+
+    const reply = async (text: string, sources: any[] = [], tokensUsed = 0) => {
+      await this.persistMessage(sessionId, dto, {
+        response: text, language, sources, tokensUsed, latencyMs: Date.now() - start,
+      });
+      return { text, language, sessionId };
+    };
+
+    // Handoff / off-topic / FAQ / cache fast paths
+    if (this.isHandoffRequest(dto.message)) {
+      await this.logUnanswered(dto.message, language, sessionId, 'handoff');
+      return reply(this.handoffReply(language));
+    }
+    const refusal = this.checkOffTopic(dto.message, language);
+    if (refusal) {
+      await this.logUnanswered(dto.message, language, sessionId, 'off_topic');
+      return reply(refusal);
+    }
+    try {
+      const faq = await this.chatPg.findFaqMatch(dto.message);
+      if (faq?.answer) return reply(faq.answer);
+    } catch { /* continue */ }
+
+    const cacheable = !(dto.history?.length);
+    if (cacheable) {
+      const cached = await this.cache.get(dto.message, language);
+      if (cached) return reply(cached.text, cached.sources);
+    }
+
+    // RAG + live data
+    const symbol = await this.dynamicApi.resolveSymbolWithDb(dto.message);
+    const [ragResult, liveData] = await Promise.all([
+      this.rag.retrieve(dto.message, language, symbol ?? undefined),
+      symbol
+        ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    const { context, sources, hadResults, topScore } = ragResult;
+
+    const hardThreshold = parseFloat(this.config.get('RAG_HARD_THRESHOLD', '0.55'));
+    const hasContext = hadResults || !!liveData;
+
+    if (!hasContext) {
+      await this.logUnanswered(dto.message, language, sessionId, 'no_data');
+      return reply(language !== 'en'
+        ? 'لا تتوفر لديّ معلومات كافية حول هذا الموضوع في قاعدة بياناتي. يرجى زيارة www.msx.om للحصول على أحدث المعلومات.'
+        : "I don't have enough information about this topic in my knowledge base. Please visit www.msx.om for the latest information.");
+    }
+    if (hadResults && !liveData && topScore < hardThreshold) {
+      await this.logUnanswered(dto.message, language, sessionId, 'low_confidence');
+      return reply(language !== 'en'
+        ? 'وجدت بعض المعلومات ذات الصلة لكنني لست متأكداً بما يكفي لتقديم إجابة موثوقة. يرجى زيارة www.msx.om أو حاول إعادة صياغة سؤالك.'
+        : 'I found some related information but my confidence is too low to give a reliable answer. Please visit www.msx.om, or try rephrasing your question.');
+    }
+
+    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData, hasContext);
+    const messages: LlmMessage[] = [
+      { role: 'system', content: systemPrompt },
+      ...((dto.history || []).slice(-6)
+        .filter(h => h.role && h.content)
+        .map(h => ({ role: h.role as 'user' | 'assistant', content: h.content }))),
+      { role: 'user', content: dto.message },
+    ];
+
+    try {
+      const result = await this.llm.complete(messages);
+      if (cacheable && !liveData && result.content) {
+        await this.cache.set(dto.message, language, {
+          text: result.content, language, sources: sources.slice(0, 5),
+        });
+      }
+      await this.trackEvent({
+        type: 'message_sent', sessionId, language,
+        channel: dto.channel || 'web', latencyMs: Date.now() - start,
+        tokensUsed: result.tokensUsed, confidenceScore: sources[0]?.score ?? 0,
+        hadContext: hadResults,
+      });
+      return reply(result.content, sources, result.tokensUsed);
+    } catch (err) {
+      this.logger.error(`chatOnce LLM error: ${err.message}`);
+      return reply(language !== 'en'
+        ? 'عذراً، حدث خطأ. يرجى المحاولة مرة أخرى.'
+        : 'Sorry, an error occurred. Please try again.');
+    }
+  }
+
   /** True when the user's message is a chart/graph request */
   private isChartRequest(message: string): boolean {
-    return /\b(chart|graph|intraday|candlestick|draw|plot|رسم\s*بياني|مخطط|بياني|ارسم)\b/i.test(message);
+    // \b does not match around Arabic letters — test Arabic terms separately
+    return /\b(chart|graph|intraday|candlestick|draw|plot)\b/i.test(message)
+        || /(رسم\s*بياني|مخطط|بياني|ارسم)/.test(message);
   }
 
   /** Parse raw MSX chart-data.aspx response into typed payload for frontend rendering */

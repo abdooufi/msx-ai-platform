@@ -10,6 +10,13 @@
     "lint": "eslint '{src,test}/**/*.ts' --fix",
     "test": "jest"
   },
+  "jest": {
+    "moduleFileExtensions": ["js", "json", "ts"],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": { "^.+\\.ts$": "ts-jest" },
+    "testEnvironment": "node"
+  },
   "dependencies": {
     "@nestjs/bull": "^10.0.0",
     "@nestjs/common": "^10.0.0",
@@ -61,6 +68,9 @@
     "@types/multer": "^1.4.11",
     "@types/node": "^20.0.0",
     "@types/passport-jwt": "^3.0.13",
+    "@types/jest": "^29.5.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0"
   }

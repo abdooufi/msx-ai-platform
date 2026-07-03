@@ -33,6 +33,35 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   /** Idempotent migrations — add created_by / updated_by to all tables */
   private async runMigrations() {
+    // unanswered_questions is populated by the chat pipeline itself, so make
+    // sure it exists even on a fresh database (all other tables are seeded
+    // externally). CREATE IF NOT EXISTS is a no-op when the table is present.
+    try {
+      await this.query(`
+        CREATE TABLE IF NOT EXISTS unanswered_questions (
+          id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          question   TEXT NOT NULL,
+          language   VARCHAR(10) DEFAULT 'en',
+          session_id VARCHAR(255),
+          reason     VARCHAR(100),
+          status     VARCHAR(50) DEFAULT 'pending',
+          admin_note TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      // Pre-existing installs may have the table without the newer columns
+      await this.query(`
+        ALTER TABLE unanswered_questions
+          ADD COLUMN IF NOT EXISTS language   VARCHAR(10) DEFAULT 'en',
+          ADD COLUMN IF NOT EXISTS session_id VARCHAR(255),
+          ADD COLUMN IF NOT EXISTS reason     VARCHAR(100),
+          ADD COLUMN IF NOT EXISTS admin_note TEXT
+      `);
+    } catch (err) {
+      this.logger.warn(`Migration skip (unanswered_questions): ${err.message}`);
+    }
+
     const tables = [
       'knowledge_base', 'faqs', 'api_endpoints',
       'companies', 'unanswered_questions', 'system_settings',
@@ -416,6 +445,57 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
 
   async deleteUnansweredQuestion(id: string) {
     return this.query(`DELETE FROM unanswered_questions WHERE id=$1 RETURNING id`, [id]);
+  }
+
+  /**
+   * Record a question the bot could not answer (called from the chat pipeline).
+   * Duplicate pending questions are collapsed: re-asking the same question only
+   * bumps updated_at instead of inserting a new row.
+   */
+  async logUnansweredQuestion(data: {
+    question:   string;
+    language?:  string;
+    sessionId?: string;
+    reason?:    string;   // 'no_data' | 'low_confidence' | 'off_topic' | 'handoff'
+  }) {
+    const existing = await this.query<{ id: string }>(
+      `SELECT id FROM unanswered_questions
+       WHERE lower(trim(question)) = lower(trim($1)) AND status = 'pending'
+       LIMIT 1`,
+      [data.question],
+    );
+    if (existing.length) {
+      await this.query(
+        `UPDATE unanswered_questions SET updated_at = NOW() WHERE id = $1`,
+        [existing[0].id],
+      );
+      return existing[0];
+    }
+    const rows = await this.query<{ id: string }>(
+      `INSERT INTO unanswered_questions (question, language, session_id, reason, status)
+       VALUES ($1, $2, $3, $4, 'pending') RETURNING id`,
+      [data.question, data.language ?? 'en', data.sessionId ?? null, data.reason ?? null],
+    );
+    return rows[0];
+  }
+
+  // ─── FAQ fast-path lookup (chat pipeline) ─────────────────────────────────
+
+  /**
+   * Exact-match FAQ lookup — case-insensitive, ignores surrounding whitespace
+   * and trailing punctuation (? ! . ؟ ، ,). Returns null when no exact match.
+   */
+  async findFaqMatch(question: string): Promise<{ question: string; answer: string } | null> {
+    const norm = question.trim().replace(/[؟?!.،,\s]+$/gu, '').toLowerCase();
+    if (!norm) return null;
+    const rows = await this.query<{ question: string; answer: string }>(
+      `SELECT question, answer FROM faqs
+       WHERE is_active = true
+         AND lower(trim(trailing ' ؟?!.،,' FROM trim(question))) = $1
+       LIMIT 1`,
+      [norm],
+    );
+    return rows[0] ?? null;
   }
 
   // ─── API Endpoints ────────────────────────────────────────────────────────

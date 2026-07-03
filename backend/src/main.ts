@@ -35,7 +35,8 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   // ── Security headers ───────────────────────────────────────────
-  app.use(helmet({ contentSecurityPolicy: false }));
+  // CSP stays off in dev (breaks Swagger UI); enabled in production.
+  app.use(helmet({ contentSecurityPolicy: isDev ? false : undefined }));
   app.use(compression());
 
   // ── CORS ───────────────────────────────────────────────────────
