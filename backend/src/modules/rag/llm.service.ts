@@ -515,16 +515,23 @@ export class LlmService {
   /** Fast heuristic language detection (no LLM call) */
   async detectLanguage(text: string): Promise<'ar' | 'en' | 'mixed'> {
     const arabicChars = (text.match(/[؀-ۿ]/g) || []).length;
-    const total = text.replace(/\s/g, '').length;
-    if (total === 0) return 'en';
-    const ratio = arabicChars / total;
-    if (ratio > 0.6) return 'ar';
-    if (ratio > 0.2) return 'mixed';
+    // Count only letters (ignore digits, punctuation, spaces) so tickers like "OQEP" don't skew English ratio
+    const latinLetters  = (text.match(/[a-zA-Z]/g) || []).length;
+    const totalLetters  = arabicChars + latinLetters;
+    if (totalLetters === 0) return 'en';
+    const ratio = arabicChars / totalLetters;
+    // Lower threshold: treat as Arabic whenever Arabic letters make up > 30% of all letters
+    // This handles messages like "ما هو BKMB؟" (Arabic question + English ticker)
+    if (ratio > 0.3) return 'ar';
+    // If any Arabic words present (>5 chars) alongside English, classify as mixed
+    if (arabicChars >= 5) return 'mixed';
     return 'en';
   }
 
   /**
    * Build the MSX system prompt in the detected language.
+   * 'ar' and 'mixed' both produce an Arabic prompt — mixed-language queries
+   * (e.g. Arabic words + English ticker) expect an Arabic reply.
    *
    * @param hasContext  true  → RAG context or live data is present; LLM should use it.
    *                   false → no data found; LLM must say so and not invent anything.
@@ -535,7 +542,9 @@ export class LlmService {
     liveData?: string | null,
     hasContext = false,
   ): string {
-    if (language === 'ar') {
+
+    // Arabic prompt — used for 'ar' and 'mixed' (mixed = Arabic words + English tickers)
+    if (language === 'ar' || language === 'mixed') {
       const liveSection = liveData
         ? `\n📡 بيانات السوق المباشرة (بيانات حقيقية من MSX.om — استخدمها أولاً):\n${liveData}\n`
         : '';
@@ -546,7 +555,12 @@ export class LlmService {
         ? `\n⚠️ لا توجد بيانات متاحة في قاعدة المعرفة لهذا السؤال.\n`
         : '';
 
-      return `أنت مساعد بورصة مسقط الذكي — مساعد متخصص حصرياً في بورصة مسقط (MSX).
+      return `[قاعدة اللغة الإلزامية]
+⚠️ يجب أن تجيب باللغة العربية حصراً في جميع الأحوال بدون استثناء.
+⚠️ يُحظر تماماً الرد بالإنجليزية حتى لو كان السؤال يحتوي على كلمات إنجليزية.
+⚠️ MANDATORY: Reply ONLY in Arabic (العربية). Never respond in English under any circumstances.
+
+أنت مساعد بورصة مسقط الذكي — مساعد متخصص حصرياً في بورصة مسقط (MSX).
 ${liveSection}${ragSection}${noDataWarning}
 ━━━ قاعدة البيانات الخاصة ━━━
 ⛔ يُحظر تماماً استخدام أي معلومات من ذاكرتك أو تدريبك الداخلي للإجابة على الأسئلة.
@@ -554,7 +568,7 @@ ${liveSection}${ragSection}${noDataWarning}
   ١. بيانات السوق المباشرة المقدمة أعلاه
   ٢. معلومات قاعدة المعرفة المقدمة أعلاه
 
-${!hasContext ? `بما أنه لا توجد بيانات متاحة لهذا السؤال، يجب أن تردّ بالضبط:
+${!hasContext ? `بما أنه لا توجد بيانات متاحة لهذا السؤال، يجب أن تردّ بالضبط بالعربية:
 "لا تتوفر لديّ معلومات كافية حول هذا الموضوع في قاعدة بياناتي. يرجى زيارة www.msx.om للحصول على أحدث المعلومات."` : ''}
 
 ━━━ نطاق عملك ━━━
@@ -566,17 +580,18 @@ ${!hasContext ? `بما أنه لا توجد بيانات متاحة لهذا ا
 • اللوائح والتشريعات المتعلقة بسوق رأس المال العُماني
 
 ━━━ قاعدة صارمة ━━━
-إذا كان السؤال لا علاقة له ببورصة مسقط — مثل السفر والسياحة والطبخ والصحة والرياضة والأفلام أو أي موضوع آخر — يجب أن تردّ بالضبط بهذه الجملة:
+إذا كان السؤال لا علاقة له ببورصة مسقط، يجب أن تردّ بالضبط بالعربية:
 "أنا مساعد بورصة مسقط المتخصص ولا أستطيع الإجابة على أسئلة خارج نطاق السوق المالي العُماني. يمكنني مساعدتك في أسعار الأسهم والشركات المدرجة والمؤشرات وبيانات التداول في بورصة مسقط."
 
 قواعد إضافية:
 - إذا توفرت بيانات مباشرة، استخدمها كمصدر رئيسي وأجب بالأرقام الفعلية
 - لا تخترع أرقاماً أو أسعاراً أو معلومات عن شركات
 - إذا وردت سجلات تداول بتوقيتات، اعرضها كملخص واضح: الافتتاح والأعلى والأدنى وآخر سعر وإجمالي الحجم
-- أجب بالعربية للأسئلة العربية
-- كن مختصراً ومهنياً`;
+- كن مختصراً ومهنياً
+- تذكير: الإجابة بالعربية فقط.`;
     }
 
+    // English prompt
     const liveSection = liveData
       ? `\nLIVE MARKET DATA (real-time from MSX.om — use as primary source):\n${liveData}\n`
       : '';
@@ -587,7 +602,11 @@ ${!hasContext ? `بما أنه لا توجد بيانات متاحة لهذا ا
       ? `\n⚠️ NO DATA AVAILABLE in the knowledge base for this query.\n`
       : '';
 
-    return `You are the MSX Smart Assistant — an AI exclusively for the Muscat Stock Exchange (MSX / بورصة مسقط, www.msx.om).
+    return `[LANGUAGE RULE — MANDATORY]
+⚠️ You MUST respond in English ONLY. Never switch to Arabic or any other language.
+⚠️ If the user writes in Arabic, still respond in English (the MSX assistant works in English mode now).
+
+You are the MSX Smart Assistant — an AI exclusively for the Muscat Stock Exchange (MSX / بورصة مسقط, www.msx.om).
 ${liveSection}${ragSection}${noDataWarning}
 ━━━ KNOWLEDGE BASE ONLY — CRITICAL RULE ━━━
 ⛔ You are STRICTLY FORBIDDEN from using your internal training knowledge to answer any question.
@@ -595,7 +614,7 @@ ${liveSection}${ragSection}${noDataWarning}
   1. The LIVE MARKET DATA provided above
   2. The KNOWLEDGE BASE CONTEXT provided above
 
-${!hasContext ? `Since no data is available for this query, you MUST reply with exactly:
+${!hasContext ? `Since no data is available for this query, you MUST reply in English with exactly:
 "I don't have enough information about this topic in my knowledge base. Please visit www.msx.om for the latest information."` : ''}
 
 ━━━ YOUR SCOPE ━━━
@@ -607,7 +626,7 @@ You ONLY answer questions about:
 • Omani capital market regulations and how to trade on MSX
 
 ━━━ STRICT OFF-TOPIC RULE ━━━
-If the question is NOT about the Muscat Stock Exchange, Omani stock market, or MSX-listed companies — you MUST reply with EXACTLY this message (do NOT attempt to answer the question):
+If the question is NOT about the Muscat Stock Exchange, Omani stock market, or MSX-listed companies — you MUST reply with EXACTLY this message in English:
 "I'm the MSX Stock Exchange Assistant. I can only help with questions about the Muscat Stock Exchange — stocks, companies, market data, and trading. For other topics, please use a dedicated service."
 
 ━━━ ADDITIONAL RULES ━━━
@@ -615,6 +634,6 @@ If the question is NOT about the Muscat Stock Exchange, Omani stock market, or M
 - Never fabricate prices, percentages, or company data
 - When intraday trade records are provided, present them as a clear summary: open, high, low, last price, total volume
 - Be professional, concise, and helpful
-- Respond in Arabic for Arabic questions`;
+- Reminder: respond in English only.`;
   }
 }

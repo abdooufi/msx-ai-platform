@@ -465,7 +465,7 @@ export class ChatService {
   }
 
   async getSuggestions(language: 'ar' | 'en' | 'mixed') {
-    if (language === 'ar') {
+    if (language === 'ar' || language === 'mixed') {
       return [
         'ما هو سعر سهم بنك مسقط؟',
         'اعرض لي مؤشر سوق مسقط اليوم',
