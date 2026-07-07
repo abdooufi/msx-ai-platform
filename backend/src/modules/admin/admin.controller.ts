@@ -17,6 +17,7 @@ import { EmbeddingService } from '../rag/embedding.service';
 import { AppPgService } from '../database/app-pg.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../../schemas/audit-log.schema';
+import { MarketRecapService } from './market-recap.service';
 
 @ApiTags('Admin')
 @ApiBearerAuth()
@@ -35,6 +36,7 @@ export class AdminController implements OnModuleInit {
     private readonly qdrant:    QdrantService,
     private readonly embedding:  EmbeddingService,
     private readonly audit:     AuditService,
+    private readonly recap:     MarketRecapService,
   ) {}
 
   /** Restore persisted AI provider on startup */
@@ -58,6 +60,20 @@ export class AdminController implements OnModuleInit {
   @ApiOperation({ summary: 'Dashboard stats (MongoDB)' })
   getStats() {
     return this.admin.getDashboardStats();
+  }
+
+  // ── Market recap ──────────────────────────────────────────────────────────
+
+  @Get('recap/status')
+  @ApiOperation({ summary: 'Daily market recap schedule status' })
+  getRecapStatus() {
+    return this.recap.getStatus();
+  }
+
+  @Post('recap/run')
+  @ApiOperation({ summary: 'Build + index today\'s market recap now' })
+  runRecap() {
+    return this.recap.runNow();
   }
 
   @Get('conversations')

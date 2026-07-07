@@ -1,6 +1,6 @@
 import {
   Controller, Post, Get, Body, Param, Query, Req, Res,
-  UseGuards, HttpCode, HttpStatus, Ip, Header,
+  UseGuards, HttpCode, HttpStatus, Ip, Header, ForbiddenException,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
@@ -52,11 +52,18 @@ export class ChatController {
   }
 
   /**
-   * GET /api/chat/session/:sessionId
-   * Retrieve a conversation by session ID.
+   * GET /api/chat/session/:sessionId?token=...
+   * Retrieve a conversation by session ID. Requires the HMAC session token
+   * that was delivered in the SSE meta event of that session.
    */
   @Get('session/:sessionId')
-  async getSession(@Param('sessionId') sessionId: string) {
+  async getSession(
+    @Param('sessionId') sessionId: string,
+    @Query('token') token?: string,
+  ) {
+    if (!this.chatService.verifySessionToken(sessionId, token ?? '')) {
+      throw new ForbiddenException('Invalid or missing session token');
+    }
     return this.chatService.getConversation(sessionId);
   }
 

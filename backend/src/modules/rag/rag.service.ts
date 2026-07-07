@@ -217,6 +217,35 @@ export class RagService {
     }
   }
 
+  /**
+   * Semantic FAQ match — vector search restricted to indexed FAQ chunks
+   * (metadata.table === 'faqs', written by PgIndexingService).
+   * Returns the matching FAQ's PG id only when similarity is very high,
+   * so rephrasings hit but loosely-related questions don't.
+   */
+  async faqSemanticMatch(
+    query: string,
+    language?: string,
+  ): Promise<{ pgId: string; score: number } | null> {
+    const threshold = parseFloat(this.config.get('RAG_FAQ_SEMANTIC_THRESHOLD', '0.88'));
+    try {
+      const vector = await this.embedding.embed(query);
+      const filter = { must: [{ key: 'table', match: { value: 'faqs' } }] };
+      const results = await this.qdrant.search(vector, 1, threshold, filter);
+      const top = results[0];
+      if (!top?.payload?.pgId) return null;
+      // Same-language FAQs only (mixed queries accept either)
+      if (language && language !== 'mixed'
+          && top.payload.language && top.payload.language !== language) {
+        return null;
+      }
+      return { pgId: String(top.payload.pgId), score: top.score };
+    } catch (err) {
+      this.logger.warn(`FAQ semantic match failed: ${err.message}`);
+      return null;
+    }
+  }
+
   /** Delete all knowledge from a specific source across all collections */
   async deleteSource(sourceId: string, companySymbol?: string): Promise<void> {
     const collections = companySymbol

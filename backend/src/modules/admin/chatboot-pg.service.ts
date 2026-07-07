@@ -479,6 +479,24 @@ export class ChatbootPgService implements OnModuleInit, OnModuleDestroy {
     return rows[0];
   }
 
+  /** Fetch one FAQ row by id (used by the semantic FAQ match) */
+  async getFaqById(id: string): Promise<{ question: string; answer: string } | null> {
+    const rows = await this.query<{ question: string; answer: string }>(
+      `SELECT question, answer FROM faqs WHERE id = $1 AND is_active = true LIMIT 1`,
+      [id],
+    );
+    return rows[0] ?? null;
+  }
+
+  /** Read a single system_settings value (null when unset) */
+  async getSetting(key: string): Promise<string | null> {
+    const rows = await this.query<{ value: string }>(
+      `SELECT value FROM system_settings WHERE key = $1 LIMIT 1`,
+      [key],
+    );
+    return rows[0]?.value ?? null;
+  }
+
   // ─── FAQ fast-path lookup (chat pipeline) ─────────────────────────────────
 
   /**

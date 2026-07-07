@@ -3,9 +3,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   HelpCircle, RefreshCw, Trash2, CheckCircle, XCircle,
-  Clock, Eye, CheckSquare, ChevronLeft, ChevronRight,
+  Clock, Eye, CheckSquare, ChevronLeft, ChevronRight, MessageSquarePlus,
 } from 'lucide-react'
-import { getPgUnanswered, updatePgUnanswered, deletePgUnanswered } from '../../../lib/api'
+import {
+  getPgUnanswered, updatePgUnanswered, deletePgUnanswered,
+  upsertPgFaq, indexTable,
+} from '../../../lib/api'
 
 type Status = 'pending' | 'reviewed' | 'resolved'
 
@@ -41,6 +44,10 @@ export default function UnansweredPage() {
   const [editId, setEditId] = useState<string | null>(null)
   const [noteText, setNoteText] = useState('')
   const [saving, setSaving] = useState(false)
+  // Convert-to-FAQ inline form
+  const [faqId, setFaqId] = useState<string | null>(null)
+  const [faqQuestion, setFaqQuestion] = useState('')
+  const [faqAnswer, setFaqAnswer] = useState('')
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
 
   const PER_PAGE = 20
@@ -109,6 +116,39 @@ export default function UnansweredPage() {
   const startEdit = (item: UnansweredQ) => {
     setEditId(item.id)
     setNoteText(item.admin_note ?? '')
+  }
+
+  const startFaq = (item: UnansweredQ) => {
+    setFaqId(item.id)
+    setFaqQuestion(item.question)
+    setFaqAnswer('')
+  }
+
+  /** Create an FAQ from this question, mark it resolved, reindex FAQs */
+  const handleConvertToFaq = async (id: string) => {
+    if (!faqQuestion.trim() || !faqAnswer.trim()) {
+      showToast('Question and answer are both required', false)
+      return
+    }
+    setSaving(true)
+    try {
+      await upsertPgFaq({
+        question:  faqQuestion.trim(),
+        answer:    faqAnswer.trim(),
+        category:  'from-unanswered',
+        is_active: true,
+      })
+      await updatePgUnanswered(id, { status: 'resolved', admin_note: 'Converted to FAQ' })
+      // Reindex FAQs so the bot picks it up (fire-and-forget)
+      indexTable('faqs').catch(() => {})
+      showToast('FAQ created — bot will answer this from now on')
+      setFaqId(null)
+      load()
+    } catch {
+      showToast('Failed to create FAQ', false)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -222,6 +262,16 @@ export default function UnansweredPage() {
                       <CheckSquare size={14} />
                     </button>
                   )}
+                  {item.status !== 'resolved' && (
+                    <button
+                      onClick={() => startFaq(item)}
+                      title="Convert to FAQ — the bot will answer this instantly from now on"
+                      className="flex items-center gap-1 p-1.5 text-emerald-400 hover:bg-emerald-900/30 rounded transition text-xs font-medium px-2"
+                    >
+                      <MessageSquarePlus size={13} />
+                      FAQ
+                    </button>
+                  )}
                   <button
                     onClick={() => startEdit(item)}
                     title="Add / edit note"
@@ -244,6 +294,44 @@ export default function UnansweredPage() {
                 <div className="bg-gray-800/60 rounded-lg px-3 py-2 text-xs text-gray-400 border-l-2 border-blue-700">
                   <span className="text-blue-400 font-medium">Note: </span>
                   {item.admin_note}
+                </div>
+              )}
+
+              {/* Convert-to-FAQ inline form */}
+              {faqId === item.id && (
+                <div className="space-y-2 bg-emerald-950/30 border border-emerald-900/50 rounded-lg p-3">
+                  <p className="text-xs text-emerald-400 font-medium flex items-center gap-1.5">
+                    <MessageSquarePlus size={12} />
+                    Convert to FAQ — edit the question if needed, then write the answer
+                  </p>
+                  <input
+                    value={faqQuestion}
+                    onChange={e => setFaqQuestion(e.target.value)}
+                    placeholder="FAQ question"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-600"
+                  />
+                  <textarea
+                    value={faqAnswer}
+                    onChange={e => setFaqAnswer(e.target.value)}
+                    placeholder="Answer the bot should give…"
+                    rows={3}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-600 resize-none"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleConvertToFaq(item.id)}
+                      disabled={saving}
+                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg transition disabled:opacity-50"
+                    >
+                      {saving ? 'Creating…' : 'Create FAQ & Resolve'}
+                    </button>
+                    <button
+                      onClick={() => setFaqId(null)}
+                      className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               )}
 

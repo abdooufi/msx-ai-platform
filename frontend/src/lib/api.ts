@@ -74,6 +74,7 @@ export async function* streamChat(
   sessionId: string | null,
   history: Array<{ role: string; content: string }>,
   channel = 'web',
+  signal?: AbortSignal,
 ) {
   const token = localStorage.getItem('msx_token')
   const res = await fetch('/api/chat', {
@@ -83,6 +84,7 @@ export async function* streamChat(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ message, sessionId, history, channel }),
+    signal,
   })
 
   if (!res.body) throw new Error('No response body')
@@ -223,6 +225,18 @@ export const updatePgUnanswered = (id: string, body: object) =>
   api.patch(`/admin/pg/unanswered-questions/${id}`, body)
 export const deletePgUnanswered = (id: string) =>
   api.delete(`/admin/pg/unanswered-questions/${id}`)
+
+// ─── System Settings (key/value) ──────────────────────────────────
+export const getSystemSettings = ()                          => api.get('/admin/pg/system-settings')
+export const setSystemSetting  = (key: string, value: string) =>
+  api.put(`/admin/pg/system-settings/${encodeURIComponent(key)}`, { value })
+
+// ─── Channels ─────────────────────────────────────────────────────
+export const getChannelsStatus = () => api.get('/channels/status')
+
+// ─── Market Recap ─────────────────────────────────────────────────
+export const getRecapStatus = () => api.get('/admin/recap/status')
+export const runRecapNow    = () => api.post('/admin/recap/run', undefined, { timeout: 120_000 })
 
 // ─── Cache Stats ──────────────────────────────────────────────────
 export const getCacheStats = () => api.get('/admin/cache/stats')

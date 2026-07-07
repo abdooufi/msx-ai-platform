@@ -6,7 +6,7 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from 'recharts'
-import { TrendingUp, RefreshCcw, MessageSquare, Globe, Monitor, Star } from 'lucide-react'
+import { TrendingUp, RefreshCcw, MessageSquare, Globe, Monitor, Star, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { getAnalytics } from '../../../lib/api'
 
 const LANG_COLORS: Record<string, string> = {
@@ -58,6 +58,7 @@ export default function AnalyticsPage() {
   const avgConf       = data?.avgConfidence ?? 0
   const topLang       = langData.sort((a, b) => b.value - a.value)[0]?.name || '—'
   const topChannel    = channelData.sort((a, b) => b.value - a.value)[0]?.name || '—'
+  const fb            = data?.feedback ?? { positive: 0, negative: 0, unrated: 0, satisfactionRate: null }
 
   return (
     <div className="p-6 space-y-6">
@@ -122,6 +123,38 @@ export default function AnalyticsPage() {
               value={topChannel}
               color="yellow"
             />
+          </div>
+
+          {/* User satisfaction (thumbs feedback) */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+            <h2 className="text-sm font-semibold text-gray-300 mb-3">
+              User Satisfaction — last {days} days
+            </h2>
+            {fb.satisfactionRate === null ? (
+              <p className="text-sm text-gray-600 py-4 text-center">
+                No thumbs-up/down feedback in this period yet — ratings appear here once users rate answers in the chat.
+              </p>
+            ) : (
+              <div className="flex items-center gap-6">
+                <span className={`text-3xl font-bold ${
+                  fb.satisfactionRate >= 80 ? 'text-green-400'
+                  : fb.satisfactionRate >= 50 ? 'text-yellow-400' : 'text-red-400'
+                }`}>
+                  {fb.satisfactionRate}%
+                </span>
+                <div className="flex-1">
+                  <div className="h-3 bg-gray-700 rounded-full overflow-hidden flex">
+                    <div className="h-full bg-green-500" style={{ width: `${fb.satisfactionRate}%` }} />
+                    <div className="h-full bg-red-500 flex-1" />
+                  </div>
+                  <div className="flex items-center gap-4 mt-2 text-xs text-gray-400">
+                    <span className="flex items-center gap-1"><ThumbsUp size={12} className="text-green-400" /> {fb.positive} positive</span>
+                    <span className="flex items-center gap-1"><ThumbsDown size={12} className="text-red-400" /> {fb.negative} negative</span>
+                    <span className="text-gray-600">{fb.unrated} unrated answers</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Volume bar chart */}

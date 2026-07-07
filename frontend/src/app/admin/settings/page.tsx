@@ -7,7 +7,7 @@ import {
   Loader2, AlertTriangle, Sparkles, Shuffle,
   Wallet, WifiOff, Wifi,
 } from 'lucide-react'
-import { getStats, getAiProviderBalance } from '../../../lib/api'
+import { getStats, getAiProviderBalance, getSystemSettings, setSystemSetting } from '../../../lib/api'
 import api from '../../../lib/api'
 import toast from 'react-hot-toast'
 
@@ -84,6 +84,10 @@ export default function SettingsPage() {
   const [switching,      setSwitching]      = useState(false)
   const [balance,        setBalance]        = useState<ProviderBalance | null>(null)
   const [balanceLoading, setBalanceLoading] = useState(false)
+  // Admin-editable bot instructions (appended to the system prompt live)
+  const [botInstructions,  setBotInstructions]  = useState('')
+  const [savedInstructions, setSavedInstructions] = useState('')
+  const [savingInstructions, setSavingInstructions] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -110,7 +114,29 @@ export default function SettingsPage() {
     finally { setBalanceLoading(false) }
   }
 
-  useEffect(() => { load(); loadBalance() }, [])
+  const loadInstructions = async () => {
+    try {
+      const r = await getSystemSettings()
+      const row = (r.data as any[]).find(s => s.key === 'bot_instructions')
+      setBotInstructions(row?.value ?? '')
+      setSavedInstructions(row?.value ?? '')
+    } catch {}
+  }
+
+  const saveInstructions = async () => {
+    setSavingInstructions(true)
+    try {
+      await setSystemSetting('bot_instructions', botInstructions)
+      setSavedInstructions(botInstructions)
+      toast.success('Bot instructions saved — live within 60 seconds')
+    } catch {
+      toast.error('Failed to save instructions')
+    } finally {
+      setSavingInstructions(false)
+    }
+  }
+
+  useEffect(() => { load(); loadBalance(); loadInstructions() }, [])
 
   const switchProvider = async (target: AiProvider) => {
     if (!provider || provider.provider === target || switching) return
@@ -429,6 +455,40 @@ CLAUDE_MODEL=claude-3-5-haiku-20241022`}
             <Loader2 size={14} className="animate-spin" /> Loading provider info…
           </div>
         )}
+      </div>
+
+      {/* ── Bot Instructions (live-editable) ─────────────────────────────── */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          <Sparkles size={16} className="text-emerald-400" />
+          <h2 className="font-semibold text-white text-sm">Bot Instructions</h2>
+          <span className="ml-auto text-xs text-gray-500">Applied live — no restart needed</span>
+        </div>
+        <p className="text-xs text-gray-500">
+          Extra rules appended to the bot's system prompt for every answer, e.g. tone, disclaimers,
+          things to always/never mention. Works in both English and Arabic answers. Leave empty for default behaviour.
+        </p>
+        <textarea
+          value={botInstructions}
+          onChange={e => setBotInstructions(e.target.value)}
+          placeholder={'Example:\n- Always remind users that data is delayed by 15 minutes.\n- Never give personal investment advice; suggest consulting a licensed broker.'}
+          rows={5}
+          maxLength={2000}
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-600 resize-y font-mono"
+        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveInstructions}
+            disabled={savingInstructions || botInstructions === savedInstructions}
+            className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-medium rounded-lg transition disabled:opacity-40"
+          >
+            {savingInstructions ? 'Saving…' : 'Save Instructions'}
+          </button>
+          {botInstructions !== savedInstructions && (
+            <span className="text-xs text-yellow-500">Unsaved changes</span>
+          )}
+          <span className="ml-auto text-[11px] text-gray-600 tabular-nums">{botInstructions.length}/2000</span>
+        </div>
       </div>
 
       {/* Info banner */}

@@ -4,6 +4,7 @@ import { AdminService } from './admin.service';
 import { ChatbootPgService } from './chatboot-pg.service';
 import { PgIndexingService } from './pg-indexing.service';
 import { DynamicApiService } from './dynamic-api.service';
+import { MarketRecapService } from './market-recap.service';
 import { AuditModule } from '../audit/audit.module';
 
 @Module({
@@ -11,7 +12,7 @@ import { AuditModule } from '../audit/audit.module';
     AuditModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService, ChatbootPgService, PgIndexingService, DynamicApiService],
+  providers: [AdminService, ChatbootPgService, PgIndexingService, DynamicApiService, MarketRecapService],
   exports: [ChatbootPgService, PgIndexingService, DynamicApiService],
 })
 export class AdminModule {}

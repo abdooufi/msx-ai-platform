@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Response } from 'express';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { RagService } from '../rag/rag.service';
 import { LlmService, LlmMessage } from '../rag/llm.service';
@@ -97,6 +98,75 @@ export class ChatService {
       : 'I understand you\'d like to speak with a person. You can reach the Muscat Stock Exchange team directly through the "Contact Us" page on the official website www.msx.om — they will be happy to help. Your request has also been logged for the support team.';
   }
 
+  // ── Session tokens ────────────────────────────────────────────────
+  // Conversations are readable via GET /chat/session/:id. The id alone is a
+  // random UUID, but we additionally require an HMAC token that only the
+  // client who ran the session received (sent in every SSE meta event).
+
+  sessionToken(sessionId: string): string {
+    const secret = this.config.get<string>('JWT_SECRET', 'dev-secret');
+    return createHmac('sha256', secret).update(`session:${sessionId}`).digest('hex').slice(0, 32);
+  }
+
+  verifySessionToken(sessionId: string, token: string): boolean {
+    if (!token) return false;
+    const expected = Buffer.from(this.sessionToken(sessionId));
+    const given    = Buffer.from(String(token));
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  }
+
+  // ── Admin-editable bot instructions (system_settings) ────────────
+
+  private extraInstructionsCache: { value: string; fetchedAt: number } | null = null;
+
+  /** Extra system-prompt instructions set from Admin → Settings; cached 60 s */
+  private async getExtraInstructions(): Promise<string> {
+    const now = Date.now();
+    if (this.extraInstructionsCache && now - this.extraInstructionsCache.fetchedAt < 60_000) {
+      return this.extraInstructionsCache.value;
+    }
+    let value = '';
+    try {
+      value = (await this.chatPg.getSetting('bot_instructions')) ?? '';
+    } catch { /* table unreachable — no extra instructions */ }
+    this.extraInstructionsCache = { value, fetchedAt: now };
+    return value;
+  }
+
+  // ── Follow-up suggestions ─────────────────────────────────────────
+
+  /**
+   * Rule-based follow-up questions shown as clickable chips after an answer.
+   * Symbol-aware: suggests the data types the user has NOT just asked about.
+   */
+  private buildFollowups(message: string, symbol: string | null, language: string): string[] {
+    const m  = message.toLowerCase();
+    const ar = language !== 'en';
+    const out: string[] = [];
+
+    if (symbol) {
+      const sym = symbol.toUpperCase();
+      const topics: Array<{ re: RegExp; en: string; ar: string }> = [
+        { re: /price|سعر/,                       en: `What is the ${sym} share price?`,   ar: `ما هو سعر سهم ${sym}؟` },
+        { re: /dividend|توزيع|أرباح/,            en: `Show ${sym} dividend history`,      ar: `اعرض توزيعات أرباح ${sym}` },
+        { re: /chart|graph|بياني|مخطط|ارسم/,     en: `Draw the ${sym} intraday chart`,    ar: `ارسم المخطط البياني لسهم ${sym}` },
+        { re: /board|مجلس|إدارة/,                en: `Who is on the ${sym} board?`,        ar: `من هم أعضاء مجلس إدارة ${sym}؟` },
+        { re: /financial|قوائم|مالية/,           en: `Show ${sym} financial results`,     ar: `اعرض النتائج المالية لـ ${sym}` },
+      ];
+      for (const t of topics) {
+        if (!t.re.test(m)) out.push(ar ? t.ar : t.en);
+        if (out.length >= 3) break;
+      }
+    } else {
+      out.push(
+        ...(ar
+          ? ['ما هو مؤشر سوق مسقط اليوم؟', 'أخبرني عن أعلى الأسهم ارتفاعاً', 'كيف أبدأ التداول في بورصة مسقط؟']
+          : ['What is the MSM30 index today?', 'Show me top gainers', 'How do I start trading on MSX?']),
+      );
+    }
+    return out.slice(0, 3);
+  }
+
   // ── SSE helpers ───────────────────────────────────────────────────
 
   private startSse(res: Response): void {
@@ -119,15 +189,19 @@ export class ChatService {
     text: string,
     language: string,
     start: number,
-    opts: { sources?: any[]; hadContext?: boolean; provider?: string } = {},
+    opts: { sources?: any[]; hadContext?: boolean; provider?: string; followups?: string[] } = {},
   ): Promise<void> {
     const sources = opts.sources ?? [];
     this.startSse(res);
     res.write(`data: ${JSON.stringify({
       type: 'meta', sessionId, language,
+      sessionToken: this.sessionToken(sessionId),
       sources: sources.slice(0, 3),
       hadContext: opts.hadContext ?? false,
     })}\n\n`);
+    if (opts.followups?.length) {
+      res.write(`data: ${JSON.stringify({ type: 'followups', suggestions: opts.followups })}\n\n`);
+    }
     res.write(`data: ${JSON.stringify({ delta: text })}\n\n`);
     res.write(`data: ${JSON.stringify({
       done: true, tokensUsed: 0, latencyMs: Date.now() - start,
@@ -181,12 +255,27 @@ export class ChatService {
       return;
     }
 
-    // 2c. FAQ exact match — answer straight from the faqs table, no LLM
+    // 2c. FAQ match — exact first (free), then semantic (one embedding call).
+    //     Both answer straight from the faqs table, no LLM.
     try {
-      const faq = await this.chatPg.findFaqMatch(dto.message);
-      if (faq?.answer) {
-        await this.sendDirectReply(res, sessionId, dto, faq.answer, language, start, {
+      let faqAnswer: string | null = null;
+      const exact = await this.chatPg.findFaqMatch(dto.message);
+      if (exact?.answer) {
+        faqAnswer = exact.answer;
+      } else {
+        const sem = await this.rag.faqSemanticMatch(dto.message, language);
+        if (sem) {
+          const faq = await this.chatPg.getFaqById(sem.pgId);
+          if (faq?.answer) {
+            faqAnswer = faq.answer;
+            this.logger.log(`Semantic FAQ hit (score ${sem.score.toFixed(2)}): "${dto.message}" → "${faq.question}"`);
+          }
+        }
+      }
+      if (faqAnswer) {
+        await this.sendDirectReply(res, sessionId, dto, faqAnswer, language, start, {
           hadContext: true, provider: 'faq',
+          followups: this.buildFollowups(dto.message, null, language),
         });
         await this.trackEvent({
           type: 'message_sent', sessionId, language,
@@ -216,13 +305,24 @@ export class ChatService {
       }
     }
 
-    // 3. Detect symbol first (fast DB lookup), then fetch RAG + live data in parallel
-    const symbol = await this.dynamicApi.resolveSymbolWithDb(dto.message);
+    // 3a. Follow-up query rewriting — resolve pronouns/references so retrieval
+    //     works on multi-turn conversations ("what about its dividends?").
+    //     Retrieval uses the rewritten form; the LLM still sees the original.
+    let retrievalQuery = dto.message;
+    if (dto.history?.length && this.config.get('RAG_QUERY_REWRITE', 'true') !== 'false') {
+      retrievalQuery = await this.llm.rewriteQuery(dto.message, dto.history.slice(-6));
+      if (retrievalQuery !== dto.message) {
+        this.logger.debug(`Query rewritten for retrieval: "${dto.message}" → "${retrievalQuery}"`);
+      }
+    }
+
+    // 3b. Detect symbol first (fast DB lookup), then fetch RAG + live data in parallel
+    const symbol = await this.dynamicApi.resolveSymbolWithDb(retrievalQuery);
     const ragStart = Date.now();
     const [ragResult, liveData] = await Promise.all([
-      this.rag.retrieve(dto.message, language, symbol ?? undefined),
+      this.rag.retrieve(retrievalQuery, language, symbol ?? undefined),
       symbol
-        ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
+        ? this.dynamicApi.fetchDynamicData(retrievalQuery, symbol).catch(() => null)
         : Promise.resolve(null),
     ]);
     const ragLatencyMs = Date.now() - ragStart;
@@ -289,7 +389,7 @@ export class ChatService {
           `| Volume | ${s.totalShares.toLocaleString()} shares |\n` +
           `| Turnover | ${s.totalTurnover.toFixed(3)} OMR |`;
 
-        res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sources: [], hadContext: false })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'meta', sessionId, language, sessionToken: this.sessionToken(sessionId), sources: [], hadContext: false })}\n\n`);
         // Send the chart data payload for the frontend chart renderer
         res.write(`data: ${JSON.stringify({ type: 'chart', chartData: chartPayload })}\n\n`);
         // Send text summary as normal delta so it shows in the message
@@ -323,8 +423,9 @@ export class ChatService {
       historyTokenCount += t;
     }
 
-    // 6. Build system prompt with retrieved context and live data
-    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData, hasContext);
+    // 6. Build system prompt with retrieved context, live data and admin instructions
+    const extraInstructions = await this.getExtraInstructions();
+    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData, hasContext, extraInstructions);
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
       ...historyMessages,
@@ -340,10 +441,17 @@ export class ChatService {
         type: 'meta',
         sessionId,
         language,
+        sessionToken: this.sessionToken(sessionId),
         sources: sources.slice(0, 3),
         hadContext: hadResults,
       })}\n\n`,
     );
+
+    // Follow-up suggestion chips (rule-based, symbol-aware)
+    const followups = this.buildFollowups(dto.message, symbol, language);
+    if (followups.length) {
+      res.write(`data: ${JSON.stringify({ type: 'followups', suggestions: followups })}\n\n`);
+    }
 
     // 8. Stream LLM response — fullText is buffered during streaming (no second call needed)
     let fullResponse = '';
@@ -510,6 +618,11 @@ export class ChatService {
     try {
       const faq = await this.chatPg.findFaqMatch(dto.message);
       if (faq?.answer) return reply(faq.answer);
+      const sem = await this.rag.faqSemanticMatch(dto.message, language);
+      if (sem) {
+        const semFaq = await this.chatPg.getFaqById(sem.pgId);
+        if (semFaq?.answer) return reply(semFaq.answer);
+      }
     } catch { /* continue */ }
 
     const cacheable = !(dto.history?.length);
@@ -518,12 +631,16 @@ export class ChatService {
       if (cached) return reply(cached.text, cached.sources);
     }
 
-    // RAG + live data
-    const symbol = await this.dynamicApi.resolveSymbolWithDb(dto.message);
+    // Follow-up rewriting, then RAG + live data
+    let retrievalQuery = dto.message;
+    if (dto.history?.length && this.config.get('RAG_QUERY_REWRITE', 'true') !== 'false') {
+      retrievalQuery = await this.llm.rewriteQuery(dto.message, dto.history.slice(-6));
+    }
+    const symbol = await this.dynamicApi.resolveSymbolWithDb(retrievalQuery);
     const [ragResult, liveData] = await Promise.all([
-      this.rag.retrieve(dto.message, language, symbol ?? undefined),
+      this.rag.retrieve(retrievalQuery, language, symbol ?? undefined),
       symbol
-        ? this.dynamicApi.fetchDynamicData(dto.message, symbol).catch(() => null)
+        ? this.dynamicApi.fetchDynamicData(retrievalQuery, symbol).catch(() => null)
         : Promise.resolve(null),
     ]);
     const { context, sources, hadResults, topScore } = ragResult;
@@ -544,7 +661,9 @@ export class ChatService {
         : 'I found some related information but my confidence is too low to give a reliable answer. Please visit www.msx.om, or try rephrasing your question.');
     }
 
-    const systemPrompt = this.llm.buildSystemPrompt(language, context, liveData, hasContext);
+    const systemPrompt = this.llm.buildSystemPrompt(
+      language, context, liveData, hasContext, await this.getExtraInstructions(),
+    );
     const messages: LlmMessage[] = [
       { role: 'system', content: systemPrompt },
       ...((dto.history || []).slice(-6)

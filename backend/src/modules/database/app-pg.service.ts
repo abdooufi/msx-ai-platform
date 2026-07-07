@@ -411,7 +411,7 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
   async getAnalyticsSummary(days = 7) {
     const since = new Date(Date.now() - days * 24 * 3600_000);
 
-    const [volume, avgConf, langDist, channelDist] = await Promise.all([
+    const [volume, avgConf, langDist, channelDist, feedbackRows] = await Promise.all([
       this.query(
         `SELECT TO_CHAR(created_at,'YYYY-MM-DD') AS _id, COUNT(*)::int AS count
          FROM analytics_events WHERE type='message_sent' AND created_at>=$1
@@ -433,13 +433,33 @@ export class AppPgService implements OnModuleInit, OnModuleDestroy {
          WHERE created_at>=$1 GROUP BY 1`,
         [since],
       ),
+      // Thumbs up/down on assistant messages within the window
+      this.query<{ fb: string; count: number }>(
+        `SELECT COALESCE(msg->>'feedback','none') AS fb, COUNT(*)::int AS count
+         FROM conversations c, jsonb_array_elements(c.messages::jsonb) AS msg
+         WHERE c.updated_at >= $1 AND msg->>'role' = 'assistant'
+         GROUP BY 1`,
+        [since],
+      ).catch(() => [] as any[]),
     ]);
+
+    const fb: Record<string, number> =
+      Object.fromEntries(feedbackRows.map((r: any) => [r.fb, r.count]));
+    const positive = fb.positive ?? 0;
+    const negative = fb.negative ?? 0;
+    const rated    = positive + negative;
 
     return {
       volume,
       avgConfidence: Math.round(parseFloat(avgConf[0]?.avg ?? '0') * 100) / 100,
       languages: Object.fromEntries(langDist.map((r: any) => [r._id, r.count])),
       channels:  Object.fromEntries(channelDist.map((r: any) => [r._id, r.count])),
+      feedback: {
+        positive,
+        negative,
+        unrated: fb.none ?? 0,
+        satisfactionRate: rated ? Math.round((positive / rated) * 100) : null,
+      },
     };
   }
 

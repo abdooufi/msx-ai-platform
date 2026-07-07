@@ -536,12 +536,52 @@ export class LlmService {
    * @param hasContext  true  → RAG context or live data is present; LLM should use it.
    *                   false → no data found; LLM must say so and not invent anything.
    */
+  /**
+   * Rewrite a follow-up question into a standalone query for retrieval.
+   * "what about its dividends?" + history mentioning Bank Muscat
+   *   → "Bank Muscat dividends"
+   * Cheap single completion; on any failure the original message is returned.
+   */
+  async rewriteQuery(
+    message: string,
+    history: Array<{ role: string; content: string }>,
+  ): Promise<string> {
+    if (!history.length) return message;
+    try {
+      const recent = history.slice(-4)
+        .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content.slice(0, 300)}`)
+        .join('\n');
+      const result = await this.complete(
+        [
+          {
+            role: 'system',
+            content:
+              'Rewrite the user\'s last message as a single standalone search query, resolving pronouns and references using the conversation. Keep the original language (Arabic stays Arabic). Output ONLY the rewritten query, nothing else. If the message is already standalone, output it unchanged.',
+          },
+          { role: 'user', content: `Conversation:\n${recent}\n\nLast message: ${message}` },
+        ],
+        { temperature: 0, maxTokens: 100 },
+        'ollama', // always local — this must be fast and cheap
+      );
+      const rewritten = result.content.trim().replace(/^["']|["']$/g, '');
+      // Sanity guards: non-empty, not absurdly long, no LLM chatter
+      if (!rewritten || rewritten.length > 300 || /\n/.test(rewritten)) return message;
+      return rewritten;
+    } catch {
+      return message;
+    }
+  }
+
   buildSystemPrompt(
     language: 'ar' | 'en' | 'mixed',
     context: string,
     liveData?: string | null,
     hasContext = false,
+    extraInstructions?: string,
   ): string {
+    const extra = extraInstructions?.trim()
+      ? `\n━━━ ${language === 'en' ? 'ADMIN INSTRUCTIONS' : 'تعليمات إضافية من الإدارة'} ━━━\n${extraInstructions.trim()}\n`
+      : '';
 
     // Arabic prompt — used for 'ar' and 'mixed' (mixed = Arabic words + English tickers)
     if (language === 'ar' || language === 'mixed') {
@@ -588,7 +628,8 @@ ${!hasContext ? `بما أنه لا توجد بيانات متاحة لهذا ا
 - لا تخترع أرقاماً أو أسعاراً أو معلومات عن شركات
 - إذا وردت سجلات تداول بتوقيتات، اعرضها كملخص واضح: الافتتاح والأعلى والأدنى وآخر سعر وإجمالي الحجم
 - كن مختصراً ومهنياً
-- تذكير: الإجابة بالعربية فقط.`;
+- تذكير: الإجابة بالعربية فقط.
+${extra}`;
     }
 
     // English prompt
@@ -634,6 +675,7 @@ If the question is NOT about the Muscat Stock Exchange, Omani stock market, or M
 - Never fabricate prices, percentages, or company data
 - When intraday trade records are provided, present them as a clear summary: open, high, low, last price, total volume
 - Be professional, concise, and helpful
-- Reminder: respond in English only.`;
+- Reminder: respond in English only.
+${extra}`;
   }
 }

@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Bot, Send, X, Maximize2, Minimize2, Trash2, ThumbsUp, ThumbsDown,
   Globe, Search, Mic, MicOff, Volume2, VolumeX, Download, Copy, Check,
-  History, ChevronLeft, Plus, Trash,
+  History, ChevronLeft, Plus, Trash, Square,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -49,6 +49,11 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
   const symDebounce  = useRef<ReturnType<typeof setTimeout> | null>(null)
   const symMenuRef   = useRef<HTMLDivElement>(null)
   const recognitionRef = useRef<any>(null)
+
+  // Follow-up suggestion chips (sent by the backend per answer)
+  const [followups, setFollowups] = useState<string[]>([])
+  // Abort controller for the in-flight stream (stop-generation button)
+  const abortRef = useRef<AbortController | null>(null)
 
   const {
     messages, sessionId, isLoading, language, sessions,
@@ -123,10 +128,14 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
     if (!msg || isLoading) return
     setInput('')
     setShowSuggest(false)
+    setFollowups([])
 
     addMessage({ role: 'user', content: msg })
     const assistantId = addMessage({ role: 'assistant', content: '', isStreaming: true })
     setLoading(true)
+
+    const controller = new AbortController()
+    abortRef.current = controller
 
     const history = messages
       .filter(m => m.role !== 'system')
@@ -135,15 +144,17 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
 
     let fullText = '', sources = [], sessionLang: 'en' | 'ar' = language
     let chartData: ChartData | undefined
+    let nextFollowups: string[] = []
 
     try {
-      for await (const chunk of streamChat(msg, sessionId, history)) {
+      for await (const chunk of streamChat(msg, sessionId, history, 'web', controller.signal)) {
         if (chunk.type === 'meta') {
           sources     = chunk.sources || []
           sessionLang = chunk.language || language
           if (chunk.language) setLanguage(chunk.language as 'en' | 'ar')
           continue
         }
+        if (chunk.type === 'followups') { nextFollowups = chunk.suggestions || []; continue }
         if (chunk.type === 'chart') { chartData = chunk.chartData as ChartData; continue }
         if (chunk.delta) {
           fullText += chunk.delta
@@ -154,20 +165,34 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
             content: fullText, isStreaming: false, sources,
             tokensUsed: chunk.tokensUsed, latencyMs: chunk.latencyMs, chartData,
           })
+          setFollowups(nextFollowups)
         }
       }
-    } catch {
-      updateMessage(assistantId, {
-        content: isRTL
-          ? 'عذراً، حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى.'
-          : '⚠️ Connection error. Please try again.',
-        isStreaming: false,
-      })
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        // User pressed stop — keep whatever streamed so far
+        updateMessage(assistantId, {
+          content: fullText || (isRTL ? '(تم الإيقاف)' : '(stopped)'),
+          isStreaming: false, sources, chartData,
+        })
+      } else {
+        updateMessage(assistantId, {
+          content: isRTL
+            ? 'عذراً، حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى.'
+            : '⚠️ Connection error. Please try again.',
+          isStreaming: false,
+        })
+      }
     } finally {
+      abortRef.current = null
       setLoading(false)
       inputRef.current?.focus()
     }
   }, [input, isLoading, messages, sessionId, language])
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort()
+  }, [])
 
   const handleFeedback = async (msg: Message, feedback: 'positive' | 'negative') => {
     if (msg.feedback) return
@@ -390,6 +415,22 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
           />
         ))}
 
+        {/* Follow-up chips — shown under the latest completed answer */}
+        {!isLoading && followups.length > 0 && messages.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 ps-9 animate-fade-in">
+            {followups.map((f, i) => (
+              <button
+                key={i}
+                onClick={() => handleSend(f)}
+                className="text-[11px] px-2.5 py-1 rounded-full bg-blue-900/30 hover:bg-blue-800/50 border border-blue-800/50 text-blue-300 transition"
+                dir={isRTL ? 'rtl' : 'ltr'}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Show typing dots while waiting for first token from the LLM */}
         {isLoading && (() => {
           const last = messages[messages.length - 1]
@@ -513,19 +554,29 @@ export default function ChatWidget({ mode = 'widget' }: Props) {
             </button>
           )}
 
-          {/* Send button */}
-          <button
-            onClick={() => handleSend()}
-            disabled={!input.trim() || isLoading}
-            className={clsx(
-              'w-10 h-10 rounded-xl flex items-center justify-center transition-all flex-shrink-0',
-              input.trim() && !isLoading
-                ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                : 'bg-gray-700 text-gray-500 cursor-not-allowed',
-            )}
-          >
-            <Send size={16} />
-          </button>
+          {/* Send / Stop button */}
+          {isLoading ? (
+            <button
+              onClick={handleStop}
+              title={isRTL ? 'إيقاف' : 'Stop generating'}
+              className="w-10 h-10 rounded-xl flex items-center justify-center transition-all flex-shrink-0 bg-red-600 hover:bg-red-500 text-white"
+            >
+              <Square size={14} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={() => handleSend()}
+              disabled={!input.trim()}
+              className={clsx(
+                'w-10 h-10 rounded-xl flex items-center justify-center transition-all flex-shrink-0',
+                input.trim()
+                  ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                  : 'bg-gray-700 text-gray-500 cursor-not-allowed',
+              )}
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
         <div className="flex items-center justify-between mt-1.5 px-0.5">
           <p className="text-xs text-gray-600">
